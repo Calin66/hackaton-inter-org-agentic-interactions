@@ -2,7 +2,7 @@
 "use client";
 
 import { ClaudeComposer } from "@/Composer";
-import { Plus, Search, MessageSquare } from "lucide-react";
+import { Plus, Search, MessageSquare, DeleteIcon, Delete, TrashIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type Message = {
@@ -16,6 +16,7 @@ const ACCENT = "#c8643c";
 
 export default function Page() {
   const [messages, setMessages] = useState<Message[]>(() => seedMessages());
+  const [items, setItems] = useState([{title:"Claim 1", id:1, active: true}]);
   const [input, setInput] = useState("");
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
@@ -43,11 +44,26 @@ export default function Page() {
     ]);
   }
 
-  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
+  function newClaim(){
+    handleChangeConvo(items.length + 1);
+    setItems(prev => {
+      const maxId = prev.length > 0 ? Math.max(...prev.map(i => i.id)) : 0;
+      return [
+        ...prev,
+        { title: `Claim ${maxId + 1}`, id: maxId + 1, active: false },
+      ];
+    });
+  }
+
+  function handleChangeConvo(id: number){
+    setItems(items.map(i => ({
+      ...i,
+      active: i.id === id
+    })));
+  }
+
+  function handleDeleteConvo(id: number){
+      setItems(prev => prev.filter(i => i.id !== id))
   }
 
   return (
@@ -63,16 +79,17 @@ export default function Page() {
             </div>
 
             <nav className="px-2">
-              <SidebarButton label="New claim" accent />
+              <SidebarButton label="New claim" accent onClick={()=>newClaim()} />
               <SidebarButton label="Search claim" />
-              <SidebarButton label="Previous claims" />
             </nav>
 
             <div className="mt-6 px-4 text-xs uppercase tracking-wider text-neutral-400">
               Recents
             </div>
             <div className="mt-2 space-y-1 px-2">
-              <RecentItem title="Claim title" active />
+              {
+                items.map(i => <RecentItem title={i.title} key={i.id} active={i.active} handleChangeConvo={()=>handleChangeConvo(i.id)} handleDeleteConvo={()=>handleDeleteConvo(i.id)}/>)
+              }
             </div>
           </div>
         </aside>
@@ -165,9 +182,11 @@ function RichText({ content }: { content: string }) {
 function SidebarButton({
   label,
   accent = false,
+  onClick = () => {}
 }: {
   label: string;
   accent?: boolean;
+  onClick?: any;
 }) {
   let Icon = MessageSquare; // default
   if (label.toLowerCase().startsWith("new")) Icon = Plus;
@@ -176,11 +195,12 @@ function SidebarButton({
 
   return (
     <button
-      className={`mb-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-neutral-900 ${
+      className={`mb-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-neutral-900 cursor-pointer ${
         accent
           ? "border border-neutral-800 bg-[#151515] text-neutral-100"
           : "text-neutral-300"
       }`}
+      onClick={onClick}
     >
       <span
         className={`inline-flex h-6 w-6 items-center justify-center rounded-md ${
@@ -195,63 +215,22 @@ function SidebarButton({
   );
 }
 
-function RecentItem({ title, active = false }: { title: string; active?: boolean }) {
+function RecentItem({ title, active = false, handleChangeConvo=()=>{}, handleDeleteConvo=()=>{} }: { title: string; active?: boolean; handleChangeConvo?:any; handleDeleteConvo?:any }) {
   return (
     <button
-      className={`group flex w-full items-center justify-between rounded-xl px-3 py-2 text-sm ${
+      className={`group flex w-full cursor-pointer items-center justify-between rounded-xl px-3 py-2 text-sm ${
         active ? "bg-neutral-900/70" : "hover:bg-neutral-900/50"
       }`}
+      onClick={handleChangeConvo}
     >
       <span className="truncate text-neutral-300">{title}</span>
-      <span className="opacity-0 transition-opacity group-hover:opacity-100">
-        <DotsIcon className="h-4 w-4 text-neutral-500" />
+      <span className="opacity-0 transition-opacity group-hover:opacity-100 hover:opacity-50" onClick={(e) => {
+          e.stopPropagation(); // prevent parent click
+          handleDeleteConvo();
+        }}>
+        <TrashIcon className="h-4 w-4 text-neutral-500" />
       </span>
     </button>
-  );
-}
-
-/* ------------------------------ Icons ---------------------------------- */
-
-function ChevronIcon(props: React.SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" {...props}>
-      <path d="M8 10l4 4 4-4" stroke="currentColor" strokeWidth="2" />
-    </svg>
-  );
-}
-function PlusIcon(props: React.SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" {...props}>
-      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" />
-    </svg>
-  );
-}
-function SendIcon(props: React.SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" {...props}>
-      <path
-        d="M22 2L11 13"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-      <path
-        d="M22 2L15 22l-4-9-9-4 20-7Z"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function DotsIcon(props: React.SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" {...props}>
-      <circle cx="5" cy="12" r="1.5" fill="currentColor" />
-      <circle cx="12" cy="12" r="1.5" fill="currentColor" />
-      <circle cx="19" cy="12" r="1.5" fill="currentColor" />
-    </svg>
   );
 }
 
