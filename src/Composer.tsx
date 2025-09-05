@@ -6,14 +6,12 @@ const BG     = "#262624";           // the non-transparent composer fill
 
 type ComposerProps = {
   onSend?: (text: string) => void;
-  modelLabel?: string;
   maxRows?: number;   // default 8
   minRows?: number;   // default 1
 };
 
 export function ClaudeComposer({
   onSend,
-  modelLabel = "Claude Sonnet 4",
   maxRows = 8,
   minRows = 1,
 }: ComposerProps) {
@@ -88,14 +86,6 @@ export function ClaudeComposer({
 
           {/* Right: model label + send */}
           <div className="mt-1 flex items-center gap-2 pl-2">
-            <button
-              className="group flex items-center gap-1 text-[15px] text-neutral-300 hover:text-neutral-100"
-              title="Change model"
-            >
-              <span>{modelLabel}</span>
-              <ChevronIcon className="h-4 w-4 opacity-80 transition-transform group-hover:translate-y-[1px]" />
-            </button>
-
             <button
               onClick={send}
               disabled={disabled}

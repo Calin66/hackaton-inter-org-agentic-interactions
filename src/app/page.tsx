@@ -2,6 +2,7 @@
 "use client";
 
 import { ClaudeComposer } from "@/Composer";
+import { Plus, Search, MessageSquare } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type Message = {
@@ -57,13 +58,13 @@ export default function Page() {
           <div className="flex h-full flex-col">
             <div className="px-4 py-4">
               <div className="flex items-center gap-2">
-                <span className="h-3 w-3 rounded-[4px] bg-neutral-700" />
                 <h1 className="text-xl font-semibold">Claim Bridge</h1>
               </div>
             </div>
 
             <nav className="px-2">
               <SidebarButton label="New claim" accent />
+              <SidebarButton label="Search claim" />
               <SidebarButton label="Previous claims" />
             </nav>
 
@@ -168,6 +169,11 @@ function SidebarButton({
   label: string;
   accent?: boolean;
 }) {
+  let Icon = MessageSquare; // default
+  if (label.toLowerCase().startsWith("new")) Icon = Plus;
+  else if (label.toLowerCase().startsWith("search")) Icon = Search;
+  else if (label.toLowerCase().startsWith("previous")) Icon = MessageSquare;
+
   return (
     <button
       className={`mb-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-neutral-900 ${
@@ -177,11 +183,13 @@ function SidebarButton({
       }`}
     >
       <span
-        className={`inline-block h-5 w-5 rounded-md ${
+        className={`inline-flex h-6 w-6 items-center justify-center rounded-md ${
           accent ? "" : "bg-neutral-700/60"
         }`}
         style={accent ? { background: ACCENT } : undefined}
-      />
+      >
+        <Icon className="h-3 w-3" />
+      </span>
       {label}
     </button>
   );
