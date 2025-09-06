@@ -34,3 +34,46 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+
+## Hospital Agent Setup & Testing
+
+### 1. Create and activate a Python virtual environment
+
+```sh
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+In case of error:
+
+```sh
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+### 2. Install required dependencies
+
+```sh
+pip install langgraph langchain langchain-openai pydantic fastapi uvicorn
+```
+
+### 3. Configure the OpenAI API key
+
+Add your key to the `.env` file:
+
+```
+OPENAI_API_KEY=sk-...
+```
+
+### 4. Start the agent API
+
+```sh
+uvicorn src.agents.hospital.api:app --reload --port 8000
+```
+
+### 5. Test the agent from CLI (example with PowerShell)
+
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8000/doctor_message" -Method Post -ContentType "application/json" -Body '{"message":"Full name Mark Johnson, SSN 328291609, diagnose S52.501A, procedures: ER visit high complexity; X-ray forearm"}'
+```

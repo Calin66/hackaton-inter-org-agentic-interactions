@@ -1,0 +1,17 @@
+{
+  "full name": "Mark Johnson",
+  "patient SSN": "328291609",
+  "hospital name": "City Hospital",
+  "date of service": "2023-10-05",
+  "diagnose": "S52.501A",
+  "procedures": [
+    {
+      "name": "ER visit high complexity",
+      "billed": 1200
+    },
+    {
+      "name": "X-ray forearm",
+      "billed": 300
+    }
+  ]
+}
