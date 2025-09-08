@@ -7,6 +7,9 @@ from .graph import app_graph, AgentState
 from .models import Claim
 from .insurance_client import send_to_insurance
 from .storage import load_claim
+from dotenv import load_dotenv
+load_dotenv()
+
 
 app = FastAPI(title="Hospital Agent API")
 
@@ -41,7 +44,10 @@ def doctor_message(payload: DoctorMessage):
         s = _to_state(s)
 
         if s.approved:
-            send_to_insurance(json.loads(s.parsed_claim.model_dump_json(by_alias=True)))
+            send_to_insurance(
+                json.loads(s.parsed_claim.model_dump_json(by_alias=True)),
+                claim_id=s.claim_id
+            )
             return AgentResponse(
                 status="approved",
                 claim_id=s.claim_id,
