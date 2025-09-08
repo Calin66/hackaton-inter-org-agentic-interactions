@@ -1,94 +1,158 @@
+# src/agents/hospital/api.py
 from __future__ import annotations
+
 import json
-from typing import List, Optional, Literal
-from fastapi import FastAPI
-from pydantic import BaseModel
-from .graph import app_graph, AgentState
-from .models import Claim
-from .insurance_client import send_to_insurance
-from .storage import load_claim
+from typing import Any, Dict, Optional, Tuple
+
+from fastapi import FastAPI, HTTPException, Body
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+
+from .agent import executor_for
+from .tariff import SYNTHETIC_TARIFF
+# Deterministic pipeline tools
+from .tools import complete_from_text_tool, summarize_invoice_tool
+
+# Load environment variables from .env (OPENAI_API_KEY, etc.)
 load_dotenv()
 
+app = FastAPI(title="Hospital Agent", version="0.2")
 
-app = FastAPI(title="Hospital Agent API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-class DoctorMessage(BaseModel):
-    message: str
-    claim_id: Optional[str] = None
+# -------------------------
+# Deterministic free-text filter endpoint
+# -------------------------
+@app.post("/doctor/parse")
+def doctor_parse(payload: dict = Body(...)):
+    """
+    Deterministic pipeline for free text:
+      text -> extract -> complete (tariff/date) -> summarize
+    Returns both the structured draft and the human-readable summary.
+    """
+    try:
+        text = (payload.get("message") or "").strip()
+        if not text:
+            raise ValueError("Body must include a non-empty 'message' field.")
 
-class AgentResponse(BaseModel):
-    status: Literal["need_fields", "preview", "approved"]
-    missing: List[str] = []
-    claim_id: Optional[str] = None
-    invoice_preview: Optional[str] = None
-    claim: Optional[dict] = None
+        # 1) extract + complete
+        completed = complete_from_text_tool.invoke({"text": text})  # -> dict draft
 
-def _to_state(s) -> AgentState:
-    """Normalize results from LangGraph .invoke() which might return dicts."""
-    if isinstance(s, AgentState):
-        return s
-    if isinstance(s, dict):
-        return AgentState(**s)
-    # last resort
-    return AgentState()
+        # 2) summarize
+        summary = summarize_invoice_tool.invoke({"draft": completed})
 
-@app.post("/doctor_message", response_model=AgentResponse)
-def doctor_message(payload: DoctorMessage):
-    if payload.claim_id:
-        # follow-up path
-        raw = load_claim(payload.claim_id)
-        state = AgentState(doctor_message=payload.message, parsed_claim=Claim(**raw), claim_id=payload.claim_id)
+        return {
+            "message": summary.get("summary", ""),
+            "draft": completed,     # structured JSON draft
+            "summary": summary,     # includes total and missing fields
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-        s = app_graph.invoke(state, node="finalize_or_request_changes")
-        s = _to_state(s)
 
-        if s.approved:
-            send_to_insurance(
-                json.loads(s.parsed_claim.model_dump_json(by_alias=True)),
-                claim_id=s.claim_id
+# -------------------------
+# Helper functions for agent-driven endpoint
+# -------------------------
+def _coerce_tool_output(val: Any) -> Optional[Dict[str, Any]]:
+    """
+    Tool outputs might be dicts or JSON strings. Best-effort normalize to dict.
+    """
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        try:
+            return json.loads(val)
+        except Exception:
+            return None
+    return None
+
+
+def _extract_tool_result(result: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Returns (summarize_result, approve_result) if found.
+    Works with both top-level keys and AgentExecutor 'intermediate_steps'
+    when return_intermediate_steps=True.
+    """
+    summarize = None
+    approve = None
+
+    # 1) Top-level keys
+    for k, v in list(result.items()):
+        if isinstance(k, str) and k.endswith(":summarize_invoice"):
+            summarize = _coerce_tool_output(v) or summarize
+        if isinstance(k, str) and k.endswith(":approve_invoice"):
+            approve = _coerce_tool_output(v) or approve
+
+    # 2) Intermediate steps
+    steps = result.get("intermediate_steps")
+    if isinstance(steps, list):
+        for action, out in steps:
+            try:
+                tool_name = getattr(action, "tool", None) or getattr(action, "tool_name", None)
+            except Exception:
+                tool_name = None
+            if tool_name == "summarize_invoice":
+                candidate = _coerce_tool_output(out)
+                if candidate:
+                    summarize = candidate
+            elif tool_name == "approve_invoice":
+                candidate = _coerce_tool_output(out)
+                if candidate:
+                    approve = candidate
+
+    return summarize, approve
+
+
+# -------------------------
+# Agent-driven conversational endpoint
+# -------------------------
+@app.post("/doctor_message")
+def doctor_message(payload: dict = Body(...)):
+    """
+    Conversational path (agent decides which tools to call).
+    With the agent prompt, free text should still go extract->complete->summarize.
+    """
+    try:
+        text = (payload.get("message") or "").strip()
+        if not text:
+            raise ValueError("Body must include a non-empty 'message' field.")
+
+        executor = executor_for("doctor")
+        result = executor.invoke({"input": text})
+
+        # Default to the agent's output text
+        agent_text = result.get("output", "") or ""
+
+        # Prefer tool outputs if present
+        summarize, approve = _extract_tool_result(result)
+        tool_result = approve or summarize
+
+        # If we have a summary, show it verbatim
+        if summarize and "summary" in summarize:
+            agent_text = summarize["summary"]
+
+        # If approved, set a clear confirmation message
+        if approve:
+            agent_text = (
+                "Invoice approved ✅. "
+                "JSON ready for insurance is available in 'tool_result.ready_for_insurance'."
             )
-            return AgentResponse(
-                status="approved",
-                claim_id=s.claim_id,
-                claim=json.loads(s.parsed_claim.model_dump_json(by_alias=True))
-            )
 
-        s = app_graph.invoke(s, node="make_invoice_preview")
-        s = _to_state(s)
+        return {"message": agent_text, "tool_result": tool_result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-        return AgentResponse(
-            status="preview",
-            claim_id=s.claim_id,
-            invoice_preview=s.invoice_preview,
-            claim=json.loads(s.parsed_claim.model_dump_json(by_alias=True)),
-        )
 
-    # first pass
-    s = app_graph.invoke(AgentState(doctor_message=payload.message))
-    s = _to_state(s)
-
-    if s.missing_fields:
-        return AgentResponse(status="need_fields", missing=s.missing_fields)
-
-    return AgentResponse(
-        status="preview",
-        claim_id=s.claim_id,
-        invoice_preview=s.invoice_preview,
-        claim=json.loads(s.parsed_claim.model_dump_json(by_alias=True)),
-    )
-
-# (optional) add CORS if frontend runs separately
-try:
-    from fastapi.middleware.cors import CORSMiddleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-except Exception:
-    pass
-
-# Run with:  uvicorn src.agents.hospital.api:app --reload --port 8000
+# -------------------------
+# Health check
+# -------------------------
+@app.get("/hospital/health")
+def health():
+    ok = bool(SYNTHETIC_TARIFF)
+    return {"ok": ok, "tariff_items": len(SYNTHETIC_TARIFF)}
