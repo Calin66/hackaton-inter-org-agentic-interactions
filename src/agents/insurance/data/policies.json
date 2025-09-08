@@ -1,0 +1,27 @@
+[
+  {
+    "policyId": "PPO-ACME-001",
+    "member": {
+      "fullName": "Mark Johnson",
+      "patientSSN": "328291609",
+      "dateOfBirth": "1989-03-11"
+    },
+    "eligibility": {
+      "activeFrom": "2025-01-01",
+      "activeTo": "2025-12-31"
+    },
+    "coverage": {
+      "procedures": ["ER visit high complexity", "X-ray forearm"],
+      "coveragePercentage": {
+        "<=500": 100,
+        ">500 && <1000": 80,
+        ">1000 && <=2000": 50,
+        ">2000": 30
+      }
+    },
+    "limits": {
+      "imaging": { "perYear": 0 },
+      "er_visit": { "perYear": 0 }
+    }
+  }
+]

@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic>=2
+langchain
+langchain-openai
+faiss-cpu
+numpy
+rapidfuzz
+python-dotenv
+SQLAlchemy
