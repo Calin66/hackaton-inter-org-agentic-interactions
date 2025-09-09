@@ -3,7 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any, List
 from pathlib import Path
 from uuid import uuid4
+from datetime import datetime
 import json
+import os
+import time
 
 from .models import MessageRequest, PendingResponse, ApprovedResponse
 from .llm import (
@@ -34,6 +37,90 @@ TARIFF: Dict[str, float] = {}
 REQUIRED_FIELDS = ["patient name", "patient SSN", "diagnose", "procedures"]
 
 
+# ---------- helpers (persisting + canonicalization + title) ----------
+
+def _claims_dir() -> Path:
+    d = Path("data/claims")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _canonicalize_invoice(inv: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Produce the JSON structure the insurer expects.
+    - Keep keys as specified.
+    - For 'billed' ensure int if whole number, else 2 decimal float.
+    """
+    out: Dict[str, Any] = {
+        "patient name": inv.get("patient name", ""),
+        "patient SSN": inv.get("patient SSN", ""),
+        "hospital name": inv.get("hospital name", ""),
+        "date of service": inv.get("date of service", ""),
+        "diagnose": inv.get("diagnose", ""),
+        "procedures": [],
+    }
+    for p in inv.get("procedures", []):
+        try:
+            billed = float(p.get("billed", 0))
+            billed = int(billed) if billed.is_integer() else round(billed, 2)
+        except Exception:
+            billed = 0
+        out["procedures"].append({"name": p.get("name", ""), "billed": billed})
+    return out
+
+
+def generate_claim_title(inv: Dict[str, Any]) -> str:
+    """
+    Create a short, human-friendly title such as:
+    'John Doe — Appendectomy · $3,450 on 2025-09-09'
+    (Falls back gracefully if fields are missing.)
+    """
+    patient = (inv.get("patient name") or "").strip()
+    if not patient:
+        patient = str(inv.get("patient SSN") or "Patient").strip()
+
+    procedures = inv.get("procedures") or []
+    main_proc = ""
+    if procedures:
+        p = procedures[0] or {}
+        main_proc = p.get("name") or ""
+
+    # compute total best-effort
+    total = None
+    try:
+        total = sum(float(p.get("billed") or 0) for p in procedures) if procedures else None
+    except Exception:
+        total = None
+
+    raw_date = inv.get("date of service")
+    try:
+        dt = datetime.fromisoformat(str(raw_date).replace("Z", "")) if raw_date else datetime.utcnow()
+    except Exception:
+        dt = datetime.utcnow()
+
+    proc_part = f" — {main_proc}" if main_proc else ""
+    total_part = f" · ${total:,.2f}" if isinstance(total, (int, float)) else ""
+    date_part = f" on {dt.date().isoformat()}"
+
+    title = f"{patient}{proc_part}{total_part}{date_part}"
+    return " ".join(title.split())[:120]
+
+
+def _save_claim(final_json: Dict[str, Any]) -> str:
+    """
+    Save the already-canonicalized claim (including 'title') into data/claims/.
+    Use a filename that’s deterministic enough for debugging.
+    """
+    ssn = str(final_json.get("patient SSN", "")).strip() or "unknown"
+    dos = str(final_json.get("date of service", "")).replace("-", "") or "nodate"
+    fname = f"{dos}_{ssn}_{uuid4().hex[:8]}.json"
+    path = _claims_dir() / fname
+    path.write_text(json.dumps(final_json, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path)
+
+
+# ---------- misc business helpers ----------
+
 def missing_required(invoice: Dict[str, Any]) -> List[str]:
     missing = []
     for key in REQUIRED_FIELDS:
@@ -46,39 +133,7 @@ def missing_required(invoice: Dict[str, Any]) -> List[str]:
     return missing
 
 
-# ---------- NEW: helpers for saving approved claims ----------
-def _claims_dir() -> Path:
-    d = Path("data/claims")
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-def _canonicalize_invoice(inv: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the invoice exactly in the required JSON structure,
-    coercing billed to int when possible (else 2-decimal float)."""
-    out: Dict[str, Any] = {
-        "patient name": inv.get("patient name", ""),
-        "patient SSN": inv.get("patient SSN", ""),
-        "hospital name": inv.get("hospital name", ""),
-        "date of service": inv.get("date of service", ""),
-        "diagnose": inv.get("diagnose", ""),
-        "procedures": [],
-    }
-    for p in inv.get("procedures", []):
-        billed = float(p.get("billed", 0))
-        billed = int(billed) if billed.is_integer() else round(billed, 2)
-        out["procedures"].append({"name": p.get("name", ""), "billed": billed})
-    return out
-
-def _save_claim(inv: Dict[str, Any]) -> str:
-    clean = _canonicalize_invoice(inv)
-    ssn = str(clean.get("patient SSN", "")).strip() or "unknown"
-    dos = str(clean.get("date of service", "")).replace("-", "") or "nodate"
-    fname = f"{dos}_{ssn}_{uuid4().hex[:8]}.json"
-    path = _claims_dir() / fname
-    path.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-    return str(path)
-# ------------------------------------------------------------
-
+# ---------- app lifecycle ----------
 
 @app.on_event("startup")
 def _startup():
@@ -86,6 +141,8 @@ def _startup():
     global TARIFF
     TARIFF = load_tariff()
 
+
+# ---------- routes ----------
 
 @app.get("/hello")
 def hello():
@@ -100,6 +157,10 @@ def hello():
 
 @app.post("/doctor_message")
 def doctor_message(req: MessageRequest):
+    """
+    Single endpoint that manages the natural-language flow.
+    Returns either a PendingResponse (keep editing) or ApprovedResponse (final JSON + saved path).
+    """
     global TARIFF
     if not TARIFF:
         try:
@@ -110,7 +171,7 @@ def doctor_message(req: MessageRequest):
     sid = store.ensure(req.session_id)
     session = store.get(sid)
 
-    # First turn (or after approval/cleared session)
+    # First turn (or after fresh approval)
     if session["status"] in ("empty", "approved") or not session.get("invoice"):
         extracted = extract_fields(req.message)
         invoice = build_initial_invoice(extracted, TARIFF)
@@ -131,7 +192,7 @@ def doctor_message(req: MessageRequest):
             )
         return PendingResponse(session_id=sid, agent_reply=reply, invoice=invoice).model_dump()
 
-    # Follow-up turns (NLU)
+    # Follow-up turns
     invoice = session["invoice"]
     current_lines = [p["name"] for p in invoice.get("procedures", [])]
 
@@ -153,12 +214,20 @@ def doctor_message(req: MessageRequest):
             store.upsert(sid, session)
             return PendingResponse(session_id=sid, agent_reply=reply, invoice=invoice).model_dump()
 
-        # SAVE the approved claim to data/claims as JSON in the requested structure
-        file_path = _save_claim(invoice)
+        # 👇 NEW: add a friendly title and save canonical JSON
+        final_json = _canonicalize_invoice(invoice)
+        final_json["title"] = generate_claim_title(final_json)
 
-        session.update({"status": "approved", "invoice": invoice})
+        file_path = _save_claim(final_json)
+
+        session.update({"status": "approved", "invoice": final_json})
         store.upsert(sid, session)
-        return ApprovedResponse(session_id=sid, final_json=_canonicalize_invoice(invoice), file_path=file_path).model_dump()
+
+        return ApprovedResponse(
+            session_id=sid,
+            final_json=final_json,
+            file_path=file_path
+        ).model_dump()
 
     elif atype == "discount_percent":
         pct = float(params.get("percent", 0))
@@ -205,6 +274,7 @@ def doctor_message(req: MessageRequest):
             "'set ER visit high complexity to 1150', or 'approve'."
         )
 
+    # Rebuild reply after edits
     miss = missing_required(invoice)
     if miss:
         pre = (status_note + "\n" if status_note else "")
