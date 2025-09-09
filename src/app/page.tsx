@@ -135,28 +135,97 @@ export default function Page() {
 
   const activeId = useMemo(() => threads.find((t) => t.active)?.id ?? threads[0].id, [threads]);
   const activeMessages = messagesById[activeId] ?? [];
+  const hasPendingInsurance = useMemo(
+    () => !!activeMessages.find((m: any) => m?.meta?.insurance_pending),
+    [activeMessages]
+  );
 
   const [pending, setPending] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const { approve, deny } = useMemo(
-    () => useInsuranceActions(threads, setThreads as any, messagesById, setMessagesById as any),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [threads, messagesById]
-  );
-
-  function handleApproveInsurance(threadId: string, sessionId: string, messageId: string) {
-    approve(threadId, sessionId, messageId);
-  }
-  function handleDenyInsurance(threadId: string, sessionId: string, messageId: string) {
-    deny(threadId, sessionId, messageId);
-  }
+  // In-chat insurance approval is disabled; approvals happen on /request
 
   // auto-scroll when new messages
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
   }, [messagesById[activeId]?.length, pending]);
+
+  // Poll backend for approved/denied insurance decisions when there is a pending one
+  useEffect(() => {
+    if (!hasPendingInsurance) return;
+    let stopped = false;
+
+    async function tick() {
+      try {
+        const res = await fetch(`${API_BASE}/insurance/requests?status=all`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const json = await res.json();
+        const items = Array.isArray(json?.items) ? json.items : [];
+        // Determine which session_id to track from the message meta
+        const pendingMsg: any = (activeMessages as any[]).find((m) => m?.meta?.insurance_pending);
+        const pendingSid = pendingMsg?.meta?.insurance_pending?.session_id || activeId;
+        const it = items.find((x: any) => x?.session_id === pendingSid);
+        if (!it) return;
+        const st = it.status;
+
+        // Skip if we've already reflected a terminal status
+        const alreadyTerminal = threads.find((t) => t.id === activeId && (t as any).insuranceStatus && (t as any).insuranceStatus !== 'pending');
+        if (alreadyTerminal) {
+          stopped = true;
+          return;
+        }
+
+        if (st === 'approved') {
+          const tool = it?.insurance_reply?.tool_result ?? null;
+          const rj = (tool?.result_json ?? {}) as any;
+          const payable = typeof rj.total_payable === 'number' ? rj.total_payable : null;
+          const policyId = rj.policy_id ?? '';
+          const totalStr = payable != null
+            ? `$${payable.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : '-';
+          const header = `## Insurance Decision (Approved)`;
+          const lines = [header, `Policy: ${policyId || '-'}`, `Total payable: ${totalStr}`];
+          const content = lines.join('\n');
+
+          // Clear pending card meta and append approved message
+          setMessagesById((m) => {
+            const msgs = (m[activeId] ?? []).map((mm: any) => (mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm));
+            return {
+              ...m,
+              [activeId]: [
+                ...msgs,
+                { id: Math.random().toString(36).slice(2, 10), role: 'assistant', content, tool_result: tool, status: 'approved' } as any,
+              ],
+            };
+          });
+          setThreads((ts) => ts.map((t) => (t.id === activeId ? { ...t, insuranceStatus: 'approved' } : t)));
+          stopped = true;
+        } else if (st === 'denied') {
+          setMessagesById((m) => {
+            const msgs = (m[activeId] ?? []).map((mm: any) => (mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm));
+            return {
+              ...m,
+              [activeId]: [
+                ...msgs,
+                { id: Math.random().toString(36).slice(2, 10), role: 'assistant', content: 'Insurance reply denied. The response was not posted to chat.', status: 'denied' } as any,
+              ],
+            };
+          });
+          setThreads((ts) => ts.map((t) => (t.id === activeId ? { ...t, insuranceStatus: 'denied' } : t)));
+          stopped = true;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // initial and interval
+    tick();
+    const id = setInterval(() => { if (!stopped) tick(); }, 5000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasPendingInsurance, activeId, threads]);
 
   /* ---------------------------- Thread actions --------------------------- */
   const newId = () => Math.random().toString(36).slice(2, 10);
@@ -326,30 +395,7 @@ export default function Page() {
           >
             <div className="max-w-3xl space-y-6 left-1/2 relative -translate-x-1/2 mt-10">
               {activeMessages.map((m) => (
-                <ChatMessage
-                  key={m.id}
-                  msg={m}
-                  onApproveInsurance={
-                    (m as any)?.meta?.insurance_pending?.policy_valid === true
-                      ? () =>
-                          handleApproveInsurance(
-                            activeId,
-                            ((m as any)?.meta?.insurance_pending as any)?.session_id || activeId,
-                            m.id
-                          )
-                      : undefined
-                  }
-                  onDenyInsurance={
-                    (m as any)?.meta?.insurance_pending?.policy_valid === true
-                      ? () =>
-                          handleDenyInsurance(
-                            activeId,
-                            ((m as any)?.meta?.insurance_pending as any)?.session_id || activeId,
-                            m.id
-                          )
-                      : undefined
-                  }
-                />
+                <ChatMessage key={m.id} msg={m} />
               ))}
 
               {/* Assistant typing skeleton while waiting */}
@@ -507,91 +553,4 @@ function seedMessages(): Message[] {
   ];
 }
 
-/* ----------------------- Insurance approval handlers -------------------- */
-
-async function postJSON(url: string, body: any) {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail || `Request failed with ${res.status}`);
-  }
-  return res.json();
-}
-
-function useInsuranceActions(
-  threads: Thread[],
-  setThreads: React.Dispatch<React.SetStateAction<Thread[]>>,
-  messagesById: Record<string, Message[]>,
-  setMessagesById: React.Dispatch<React.SetStateAction<Record<string, Message[]>>>
-) {
-  const newId = () => Math.random().toString(36).slice(2, 10);
-
-  async function approve(threadId: string, sessionId: string, messageId: string) {
-    const data = await postJSON(`${API_BASE}/approve_insurance`, {
-      session_id: sessionId,
-      decision: 'approve',
-    });
-
-    // Append a single approved insurance reply (with badge) and clear approval card
-    setMessagesById((m) => {
-      const msgs = (m[threadId] ?? []).map((mm) =>
-        mm.id === messageId ? { ...mm, meta: undefined } : mm
-      );
-      const tool = (data as any)?.insurance_tool_result ?? null;
-      const rj = tool?.result_json ?? {};
-      const payable = typeof rj.total_payable === 'number' ? rj.total_payable : null;
-      const policyId = rj.policy_id ?? '';
-      const totalStr = payable != null ? `$${payable.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-';
-      const header = `## Insurance Decision (Approved)`;
-      const lines = [header, `Policy: ${policyId || '—'}`, `Total payable: ${totalStr}`];
-      const content = lines.join('\n');
-      return {
-        ...m,
-        [threadId]: [
-          ...msgs,
-          {
-            id: newId(),
-            role: 'assistant',
-            content,
-            tool_result: tool,
-            status: 'approved',
-          } as any,
-        ],
-      };
-    });
-
-    setThreads((ts) => ts.map((t) => (t.id === threadId ? { ...t, insuranceStatus: 'approved' } : t)));
-  }
-
-  async function deny(threadId: string, sessionId: string, messageId: string) {
-    await postJSON(`${API_BASE}/approve_insurance`, {
-      session_id: sessionId,
-      decision: 'deny',
-    });
-    // Remove approval card and keep indicator cleared; add a status message
-    setMessagesById((m) => {
-      const msgs = (m[threadId] ?? []).map((mm) =>
-        mm.id === messageId ? { ...mm, meta: undefined } : mm
-      );
-      return {
-        ...m,
-        [threadId]: [
-          ...msgs,
-          {
-            id: newId(),
-            role: 'assistant',
-            content: 'Insurance reply denied. The response was not posted to chat.',
-            status: 'denied',
-          } as any,
-        ],
-      };
-    });
-    setThreads((ts) => ts.map((t) => (t.id === threadId ? { ...t, insuranceStatus: 'denied' } : t)));
-  }
-
-  return { approve, deny };
-}
+/* (Removed) In-chat insurance approval handlers – now handled on /request */

@@ -199,7 +199,7 @@ def doctor_message(req: MessageRequest):
             out = PendingResponse(
                 session_id=sid,
                 agent_reply=(
-                    "Sent the claim to the insurance agent. An answer was received and is awaiting your approval."
+                    "Sent the claim to the insurance agent and is awaiting for approval"
                 ),
                 invoice=invoice,
             ).model_dump()
@@ -275,7 +275,7 @@ def doctor_message(req: MessageRequest):
         out = PendingResponse(
             session_id=sid,
             agent_reply=(
-                "Sent the claim to the insurance agent. An answer was received and is awaiting your approval."
+                "Sent the claim to the insurance agent and is awaiting for approval."
             ),
             invoice=invoice,
         ).model_dump()

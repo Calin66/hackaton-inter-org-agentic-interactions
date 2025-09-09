@@ -1,6 +1,5 @@
 import type { Message } from '@/types';
 import { InvoiceSummaryCard } from '@/components/InvoiceSummaryCard';
-import { InsuranceApprovalCard } from '@/components/InsuranceApprovalCard';
 import { InsuranceSummary } from '@/components/InsuranceSummary';
 
 export function ChatMessage({
@@ -59,23 +58,9 @@ export function ChatMessage({
           </div>
         ) : null}
 
-        {/* Insurance approval flow */}
-        {isAssistant && (msg as any)?.meta?.insurance_pending ? (
-          <div className="mt-3">
-            <InsuranceApprovalCard
-              reply={(msg as any)?.meta?.insurance_pending?.text ?? ''}
-              tool={(msg as any)?.meta?.insurance_pending?.tool_result}
-              onApprove={() => onApproveInsurance?.()}
-              onDeny={() => onDenyInsurance?.()}
-              hideActions={!((msg as any)?.meta?.insurance_pending?.policy_valid === true)}
-              header={
-                (msg as any)?.meta?.insurance_pending?.policy_valid === true
-                  ? undefined
-                  : 'No valid policy found'
-              }
-            />
-          </div>
-        ) : null}
+        {/* Insurance approval flow (hidden in hospital chat until validated) */}
+        {/* When insurance is pending validation, we don't render the approval card here. */}
+        {isAssistant && (msg as any)?.meta?.insurance_pending ? null : null}
       </div>
     </div>
   );
