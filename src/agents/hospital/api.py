@@ -117,10 +117,11 @@ def _extract_tool_result(result: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any
 def doctor_message(payload: dict = Body(...)):
     try:
         text = (payload.get("message") or "").strip()
+        session_id = str(payload.get("session_id") or "default")   # <— NEW
         if not text:
             raise ValueError("Body must include a non-empty 'message' field.")
 
-        executor = executor_for("doctor")
+        executor = executor_for(session_id)                         # <— USE IT
         result = executor.invoke({"input": text})
 
         agent_text = result.get("output", "") or ""

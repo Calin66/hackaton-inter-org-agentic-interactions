@@ -21,7 +21,6 @@ SYSTEM = SystemMessage(
     )
 )
 
-
 prompt = ChatPromptTemplate.from_messages(
     [
         SYSTEM,

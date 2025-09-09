@@ -5,84 +5,134 @@ import { ClaudeComposer } from "@/Composer";
 import { Plus, Search, MessageSquare, TrashIcon, ChevronDown, ChevronUp } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+/* ------------------------------- Types ---------------------------------- */
+
 type Message = {
   id: string;
   role: "assistant" | "user" | "system";
   content: string;
   ts?: string;
-  tool_result?: any; // <- NEW: carry tool result alongside assistant message
+  tool_result?: any;
 };
 
+type Thread = { id: string; title: string; active: boolean };
+
+/* ----------------------------- Constants -------------------------------- */
+
 const ACCENT = "#c8643c";
-const NEXT_PUBLIC_API_BASE="http://localhost:8000"
-const API_BASE = NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") ?? ""; // e.g. http://localhost:8000
+const NEXT_PUBLIC_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+const API_BASE = NEXT_PUBLIC_API_BASE.replace(/\/$/, "");
+
+/* -------------------------------- Page ---------------------------------- */
 
 export default function Page() {
-  const [messages, setMessages] = useState<Message[]>(() => seedMessages());
-  const [items, setItems] = useState([{ title: "Claim 1", id: 1, active: true }]);
+  // Threads (left sidebar)
+  const [threads, setThreads] = useState<Thread[]>(() => {
+    if (typeof window !== "undefined") {
+      const raw = localStorage.getItem("threads");
+      if (raw) return JSON.parse(raw);
+    }
+    return [{ id: crypto.randomUUID(), title: "Claim 1", active: true }];
+  });
+
+  // Messages keyed by thread id
+  const [messagesById, setMessagesById] = useState<Record<string, Message[]>>(() => {
+    if (typeof window !== "undefined") {
+      const raw = localStorage.getItem("messagesById");
+      if (raw) return JSON.parse(raw);
+    }
+    const only = (threads?.[0]?.id ?? crypto.randomUUID());
+    return { [only]: seedMessages() };
+  });
+
+  const activeId = useMemo(() => threads.find((t) => t.active)?.id ?? threads[0].id, [threads]);
   const [pending, setPending] = useState(false);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
+  // Auto-scroll on new messages in active thread
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
-  }, [messages.length]);
+  }, [messagesById[activeId]?.length]);
+
+  // Persist to localStorage
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem("threads", JSON.stringify(threads));
+    localStorage.setItem("messagesById", JSON.stringify(messagesById));
+  }, [threads, messagesById]);
+
+  /* ---------------------------- Thread actions --------------------------- */
+
+  function handleChangeConvo(id: string) {
+    setThreads((ts) => ts.map((t) => ({ ...t, active: t.id === id })));
+  }
 
   function newClaim() {
-    handleChangeConvo(items.length + 1);
-    setItems((prev) => {
-      const maxId = prev.length > 0 ? Math.max(...prev.map((i) => i.id)) : 0;
-      return [...prev, { title: `Claim ${maxId + 1}`, id: maxId + 1, active: false }];
+    setThreads((prev) => {
+      const next = prev.map((t) => ({ ...t, active: false }));
+      const id = crypto.randomUUID();
+      return [...next, { id, title: `Claim ${next.length + 1}`, active: true }];
+    });
+    setMessagesById((map) => {
+      const id = threads.find((t) => t.active)?.id ?? Object.keys(map)[0];
+      const newId = crypto.randomUUID();
+      return { ...map, [newId]: seedMessages() };
     });
   }
 
-  function handleChangeConvo(id: number) {
-    setItems(items.map((i) => ({ ...i, active: i.id === id })));
+  function handleDeleteConvo(id: string) {
+    setThreads((prev) => {
+      const filtered = prev.filter((t) => t.id !== id);
+      if (!filtered.length) {
+        const newId = crypto.randomUUID();
+        setMessagesById({ [newId]: seedMessages() });
+        return [{ id: newId, title: "Claim 1", active: true }];
+      }
+      // If deleting active, activate first remaining
+      if (prev.find((t) => t.id === id)?.active) filtered[0].active = true;
+      return filtered;
+    });
+    setMessagesById(({ [id]: _, ...rest }) => rest);
   }
 
-  function handleDeleteConvo(id: number) {
-    setItems((prev) => prev.filter((i) => i.id !== id));
-  }
+  /* ----------------------------- Networking ----------------------------- */
 
-  async function sendToBackend(text: string) {
-    const controller = new AbortController();
+  async function sendToBackend(text: string, sessionId: string) {
     setPending(true);
     try {
       const res = await fetch(`${API_BASE}/doctor_message`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
-        signal: controller.signal,
+        body: JSON.stringify({ message: text, session_id: sessionId }),
       });
-
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err?.detail || `Request failed with ${res.status}`);
       }
-
       const data: { message: string; tool_result?: any } = await res.json();
-
-      setMessages((m) => [
+      setMessagesById((m) => ({
         ...m,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: data.message ?? "",
-          tool_result: data.tool_result, // <- will render under the bubble
-        },
-      ]);
+        [sessionId]: [
+          ...(m[sessionId] ?? []),
+          { id: crypto.randomUUID(), role: "assistant", content: data.message ?? "", tool_result: data.tool_result },
+        ],
+      }));
     } catch (e: any) {
-      setMessages((m) => [
+      setMessagesById((m) => ({
         ...m,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: `⚠️ Sorry, I couldn't process that request.\n- ${e?.message ?? e}`,
-        },
-      ]);
+        [sessionId]: [
+          ...(m[sessionId] ?? []),
+          { id: crypto.randomUUID(), role: "assistant", content: `⚠️ Sorry, I couldn't process that request.\n- ${e?.message ?? e}` },
+        ],
+      }));
     } finally {
       setPending(false);
     }
   }
+
+  const activeMessages = messagesById[activeId] ?? [];
+
+  /* -------------------------------- Render ------------------------------- */
 
   return (
     <div className="h-dvh w-dvw bg-[#0f0f0f] text-neutral-200 antialiased">
@@ -93,25 +143,23 @@ export default function Page() {
             <div className="px-4 py-4">
               <div className="flex items-center gap-2">
                 <h1 className="text-xl font-semibold">Claim Bridge</h1>
-            </div>
+              </div>
             </div>
 
             <nav className="px-2">
-              <SidebarButton label="New claim" accent onClick={() => newClaim()} />
+              <SidebarButton label="New claim" accent onClick={newClaim} />
               <SidebarButton label="Search claim" />
             </nav>
 
-            <div className="mt-6 px-4 text-xs uppercase tracking-wider text-neutral-400">
-              Recents
-            </div>
+            <div className="mt-6 px-4 text-xs uppercase tracking-wider text-neutral-400">Recents</div>
             <div className="mt-2 space-y-1 px-2">
-              {items.map((i) => (
+              {threads.map((t) => (
                 <RecentItem
-                  title={i.title}
-                  key={i.id}
-                  active={i.active}
-                  handleChangeConvo={() => handleChangeConvo(i.id)}
-                  handleDeleteConvo={() => handleDeleteConvo(i.id)}
+                  title={t.title}
+                  key={t.id}
+                  active={t.active}
+                  handleChangeConvo={() => handleChangeConvo(t.id)}
+                  handleDeleteConvo={() => handleDeleteConvo(t.id)}
                 />
               ))}
             </div>
@@ -125,34 +173,36 @@ export default function Page() {
             ref={scrollerRef}
             className="left-1/2 relative -translate-x-1/2 mt-2 h-[calc(100dvh-210px)] w-full max-w-5xl overflow-y-auto px-6 pb-6"
           >
-            <div className="max-w-3xl space-y-6 left-1/2 relative -translate-x-1/2 mt-10 ">
-              {messages.map((m) => (
+            <div className="max-w-3xl space-y-6 left-1/2 relative -translate-x-1/2 mt-10">
+              {activeMessages.map((m) => (
                 <ChatMessage key={m.id} msg={m} />
               ))}
               <div className="py-8" />
             </div>
           </div>
 
-          {/* Composer — call backend on send */}
+          {/* Composer */}
           <ClaudeComposer
             disabledd={pending}
             onSend={(text) => {
               const trimmed = (text ?? "").trim();
               if (!trimmed) return;
               // optimistic user bubble
-              setMessages((m) => [...m, { id: crypto.randomUUID(), role: "user", content: trimmed }]);
+              setMessagesById((m) => ({
+                ...m,
+                [activeId]: [...(m[activeId] ?? []), { id: crypto.randomUUID(), role: "user", content: trimmed }],
+              }));
               // server call
-              sendToBackend(trimmed);
+              sendToBackend(trimmed, activeId);
             }}
           />
         </main>
       </div>
 
-      {/* Smooth transitions everywhere */}
+      {/* Smooth transitions */}
       <style>{`
         * { transition: background-color .2s ease, color .2s ease, border-color .2s ease; }
         ::selection { background: ${ACCENT}66; color: white; }
-        /* Nice scrollbars */
         *::-webkit-scrollbar { height: 12px; width: 12px; }
         *::-webkit-scrollbar-thumb { background: #262626; border-radius: 999px; border: 3px solid #121212; }
         *::-webkit-scrollbar-track { background: transparent; }
@@ -161,23 +211,22 @@ export default function Page() {
   );
 }
 
-/* ----------------------------- Components ------------------------------ */
+/* ----------------------------- Components ------------------------------- */
 
 function ChatMessage({ msg }: { msg: Message }) {
   const isUser = msg.role === "user";
   const isAssistant = msg.role === "assistant";
 
-  const bubbleClass = useMemo(() => {
-    if (isUser) return "bg-[rgba(200,100,60,0.12)] border-[rgba(200,100,60,0.45)]";
-    if (isAssistant) return "bg-[#121212] border-neutral-800";
-    return "bg-transparent border-transparent";
-  }, [isUser, isAssistant]);
+  const bubbleClass = isUser
+    ? "bg-[rgba(200,100,60,0.12)] border-[rgba(200,100,60,0.45)]"
+    : isAssistant
+    ? "bg-[#121212] border-neutral-800"
+    : "bg-transparent border-transparent";
 
   return (
     <div className="flex gap-3">
       <div className={`w-full rounded-2xl border px-4 py-3 leading-relaxed ${bubbleClass}`}>
         <RichText content={msg.content} />
-        {/* Render tool_result under assistant messages when present */}
         {isAssistant && msg.tool_result !== undefined ? (
           <div className="mt-3">
             <ToolResultCard data={msg.tool_result} />
@@ -208,7 +257,6 @@ function ToolResultCard({ data }: { data: any }) {
   );
 }
 
-// Minimal "rich text" renderer for headings/bullets like in the screenshot
 function RichText({ content }: { content: string }) {
   const lines = content.split("\n");
   return (
@@ -290,7 +338,7 @@ function RecentItem({
   );
 }
 
-/* ------------------------------ Seed ----------------------------------- */
+/* ------------------------------- Seed ----------------------------------- */
 
 function seedMessages(): Message[] {
   return [
@@ -298,7 +346,7 @@ function seedMessages(): Message[] {
       id: "m1",
       role: "assistant",
       content:
-        "## Text colors\n- Warm whites and light browns that complement the dark backgrounds\n- Border colors: subtle browns for definition without being harsh\n- Button states: darker variants for hover/active\n- Assistant messages: slightly lighter than the main background for contrast\n\n## Key Features:\n- **Input focus**: The input border turns orange (#c8643c) when focused\n- **User messages**: Orange-tinted background matching the accent color\n- **Assistant messages**: Subtle dark background that stands out\n- **Smooth transitions**: All interactive elements have smooth color transitions\n\nThe interface has a warm, sophisticated dark theme similar to Claude’s. The orange accent provides contrast while maintaining readability.",
+        "## Welcome\nStart a claim in this thread. Create new threads in the sidebar to keep conversations separated.",
     },
   ];
 }
