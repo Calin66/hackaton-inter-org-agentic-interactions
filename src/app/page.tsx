@@ -1,113 +1,80 @@
-// app/page.tsx
-"use client";
+'use client';
 
-import { ClaudeComposer } from "@/Composer";
-import {
-  Plus,
-  Search,
-  MessageSquare,
-  TrashIcon,
-  ChevronDown,
-  ChevronUp,
-  X as CloseIcon,
-} from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-
-/* ------------------------------- Types ---------------------------------- */
-
-type Message = {
-  id: string;
-  role: "assistant" | "user" | "system";
-  content: string;
-  ts?: string;
-  tool_result?: any;
-};
-
-type Thread = { id: string; title: string; active: boolean };
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ClaudeComposer } from '@/components/Composer';
+import { SidebarButton } from '@/components/SidebarButton';
+import { RecentItem } from '@/components/RecentItem';
+import { ChatMessage } from '@/components/ChatMessage';
+import { SearchModal } from '@/components/SearchModal';
+import type { Message, Thread } from '@/types';
+import { parseInvoiceFromText, mergeToolResults } from '@/lib/invoice/parse';
 
 /* ----------------------------- Constants -------------------------------- */
-
-const ACCENT = "#c8643c";
-const NEXT_PUBLIC_API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
-const API_BASE = NEXT_PUBLIC_API_BASE.replace(/\/$/, "");
-
-// IMPORTANT: deterministic ID used on the first server render
-const INITIAL_THREAD_ID = "t-1";
-
-/* -------------------------------- Page ---------------------------------- */
+const ACCENT = '#c8643c';
+const NEXT_PUBLIC_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8000';
+const API_BASE = NEXT_PUBLIC_API_BASE.replace(/\/$/, '');
+const INITIAL_THREAD_ID = 't-1'; // deterministic for SSR
 
 export default function Page() {
-  // Deterministic, SSR-safe initial state (no random, no localStorage)
   const [threads, setThreads] = useState<Thread[]>([
-    { id: INITIAL_THREAD_ID, title: "Claim 1", active: true },
+    { id: INITIAL_THREAD_ID, title: 'Claim 1', active: true },
   ]);
-
   const [messagesById, setMessagesById] = useState<Record<string, Message[]>>({
     [INITIAL_THREAD_ID]: seedMessages(),
   });
 
-  // After mount, hydrate from localStorage (client only)
+  // hydrate from localStorage
   useEffect(() => {
     try {
-      const rawT = localStorage.getItem("threads");
-      const rawM = localStorage.getItem("messagesById");
+      const rawT = localStorage.getItem('threads');
+      const rawM = localStorage.getItem('messagesById');
       if (rawT && rawM) {
         const parsedT: Thread[] = JSON.parse(rawT);
         const parsedM: Record<string, Message[]> = JSON.parse(rawM);
-        // sanity guard: ensure there's at least one thread/messages list
-        if (Array.isArray(parsedT) && parsedT.length > 0) setThreads(parsedT);
-        if (parsedM && typeof parsedM === "object") setMessagesById(parsedM);
+        if (Array.isArray(parsedT) && parsedT.length) setThreads(parsedT);
+        if (parsedM && typeof parsedM === 'object') setMessagesById(parsedM);
       }
     } catch {
-      /* ignore localStorage parse errors */
+      /* ignore */
     }
   }, []);
 
-  const activeId = useMemo(
-    () => threads.find((t) => t.active)?.id ?? threads[0].id,
-    [threads]
-  );
-
-  const [pending, setPending] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const scrollerRef = useRef<HTMLDivElement | null>(null);
-
-  // Auto-scroll on new messages in active thread
-  useEffect(() => {
-    scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
-  }, [messagesById[activeId]?.length]);
-
-  // Persist to localStorage (client)
+  // persist to localStorage
   useEffect(() => {
     try {
-      localStorage.setItem("threads", JSON.stringify(threads));
-      localStorage.setItem("messagesById", JSON.stringify(messagesById));
+      localStorage.setItem('threads', JSON.stringify(threads));
+      localStorage.setItem('messagesById', JSON.stringify(messagesById));
     } catch {
       /* ignore */
     }
   }, [threads, messagesById]);
 
+  const activeId = useMemo(() => threads.find((t) => t.active)?.id ?? threads[0].id, [threads]);
+  const activeMessages = messagesById[activeId] ?? [];
+
+  const [pending, setPending] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+
+  // auto-scroll when new messages
+  useEffect(() => {
+    scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
+  }, [messagesById[activeId]?.length]);
+
   /* ---------------------------- Thread actions --------------------------- */
+  const newId = () => Math.random().toString(36).slice(2, 10);
 
   function handleChangeConvo(id: string) {
     setThreads((ts) => ts.map((t) => ({ ...t, active: t.id === id })));
   }
 
-  function newId() {
-    // Generates on client after hydration, so randomness is OK here.
-    return Math.random().toString(36).slice(2, 10);
-  }
-
   function newClaim() {
     const id = newId();
-    // 1) Activate the new thread
     setThreads((prev) => {
       const next = prev.map((t) => ({ ...t, active: false }));
       return [...next, { id, title: `Claim ${next.length + 1}`, active: true }];
     });
-    // 2) Seed welcome message (always)
     setMessagesById((prev) => ({ ...prev, [id]: seedMessages() }));
   }
 
@@ -115,9 +82,8 @@ export default function Page() {
     setThreads((prev) => {
       const filtered = prev.filter((t) => t.id !== id);
       if (!filtered.length) {
-        // recreate deterministic default thread
         setMessagesById({ [INITIAL_THREAD_ID]: seedMessages() });
-        return [{ id: INITIAL_THREAD_ID, title: "Claim 1", active: true }];
+        return [{ id: INITIAL_THREAD_ID, title: 'Claim 1', active: true }];
       }
       if (prev.find((t) => t.id === id)?.active) filtered[0].active = true;
       return filtered;
@@ -126,13 +92,12 @@ export default function Page() {
   }
 
   /* ----------------------------- Networking ----------------------------- */
-
   async function sendToBackend(text: string, sessionId: string) {
     setPending(true);
     try {
       const res = await fetch(`${API_BASE}/doctor_message`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, session_id: sessionId }),
       });
       if (!res.ok) {
@@ -140,16 +105,15 @@ export default function Page() {
         throw new Error(err?.detail || `Request failed with ${res.status}`);
       }
       const data: { message: string; tool_result?: any } = await res.json();
+
+      const parsed = parseInvoiceFromText(data.message ?? '');
+      const mergedTool = mergeToolResults(data.tool_result, parsed);
+
       setMessagesById((m) => ({
         ...m,
         [sessionId]: [
           ...(m[sessionId] ?? []),
-          {
-            id: newId(),
-            role: "assistant",
-            content: data.message ?? "",
-            tool_result: data.tool_result,
-          },
+          { id: newId(), role: 'assistant', content: data.message ?? '', tool_result: mergedTool },
         ],
       }));
     } catch (e: any) {
@@ -159,10 +123,8 @@ export default function Page() {
           ...(m[sessionId] ?? []),
           {
             id: newId(),
-            role: "assistant",
-            content: `⚠️ Sorry, I couldn't process that request.\n- ${
-              e?.message ?? e
-            }`,
+            role: 'assistant',
+            content: `⚠️ Sorry, I couldn't process that request.\n- ${e?.message ?? e}`,
           },
         ],
       }));
@@ -171,9 +133,6 @@ export default function Page() {
     }
   }
 
-  const activeMessages = messagesById[activeId] ?? [];
-
-  // Simple local, title-only search of threads
   const filteredThreads = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return threads;
@@ -181,7 +140,6 @@ export default function Page() {
   }, [searchQuery, threads]);
 
   /* -------------------------------- Render ------------------------------- */
-
   return (
     <div className="h-dvh w-dvw bg-[#0f0f0f] text-neutral-200 antialiased">
       <div className="grid h-full w-full grid-cols-[280px_1fr]">
@@ -189,9 +147,7 @@ export default function Page() {
         <aside className="h-full border-r border-neutral-800/80 bg-[#111111]">
           <div className="flex h-full flex-col">
             <div className="px-4 py-4">
-              <div className="flex items-center gap-2">
-                <h1 className="text-xl font-semibold">Claim Bridge</h1>
-              </div>
+              <h1 className="text-xl font-semibold">Claim Bridge</h1>
             </div>
 
             <nav className="px-2">
@@ -199,7 +155,7 @@ export default function Page() {
               <SidebarButton
                 label="Search claim"
                 onClick={() => {
-                  setSearchQuery("");
+                  setSearchQuery('');
                   setSearchOpen(true);
                 }}
               />
@@ -211,8 +167,8 @@ export default function Page() {
             <div className="mt-2 space-y-1 px-2">
               {threads.map((t) => (
                 <RecentItem
-                  title={t.title}
                   key={t.id}
+                  title={t.title}
                   active={t.active}
                   handleChangeConvo={() => handleChangeConvo(t.id)}
                   handleDeleteConvo={() => handleDeleteConvo(t.id)}
@@ -224,7 +180,6 @@ export default function Page() {
 
         {/* Main chat area */}
         <main className="relative flex h-full flex-col">
-          {/* Messages */}
           <div
             ref={scrollerRef}
             className="left-1/2 relative -translate-x-1/2 mt-2 h-[calc(100dvh-210px)] w-full max-w-5xl overflow-y-auto px-6 pb-6"
@@ -237,29 +192,25 @@ export default function Page() {
             </div>
           </div>
 
-          {/* Composer */}
           <ClaudeComposer
             disabledd={pending}
             onSend={(text) => {
-              const trimmed = (text ?? "").trim();
+              const trimmed = (text ?? '').trim();
               if (!trimmed) return;
-              // optimistic user bubble
               setMessagesById((m) => ({
                 ...m,
                 [activeId]: [
                   ...(m[activeId] ?? []),
-                  { id: newId(), role: "user", content: trimmed },
+                  { id: newId(), role: 'user', content: trimmed },
                 ],
               }));
-              // server call
               sendToBackend(trimmed, activeId);
             }}
           />
         </main>
       </div>
 
-      {/* Search modal */}
-      {searchOpen ? (
+      {searchOpen && (
         <SearchModal
           query={searchQuery}
           onQueryChange={setSearchQuery}
@@ -270,9 +221,8 @@ export default function Page() {
             setSearchOpen(false);
           }}
         />
-      ) : null}
+      )}
 
-      {/* Smooth transitions */}
       <style>{`
         * { transition: background-color .2s ease, color .2s ease, border-color .2s ease; }
         ::selection { background: ${ACCENT}66; color: white; }
@@ -284,211 +234,13 @@ export default function Page() {
   );
 }
 
-/* ----------------------------- Components ------------------------------- */
-
-function ChatMessage({ msg }: { msg: Message }) {
-  const isUser = msg.role === "user";
-  const isAssistant = msg.role === "assistant";
-
-  const bubbleClass = isUser
-    ? "bg-[rgba(200,100,60,0.12)] border-[rgba(200,100,60,0.45)]"
-    : isAssistant
-    ? "bg-[#121212] border-neutral-800"
-    : "bg-transparent border-transparent";
-
-  return (
-    <div className="flex gap-3">
-      <div className={`w-full rounded-2xl border px-4 py-3 leading-relaxed ${bubbleClass}`}>
-        <RichText content={msg.content} />
-        {isAssistant && msg.tool_result !== undefined ? (
-          <div className="mt-3">
-            <ToolResultCard data={msg.tool_result} />
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function ToolResultCard({ data }: { data: any }) {
-  const [open, setOpen] = useState(true);
-  return (
-    <div className="rounded-xl border border-neutral-800 bg-[#0f0f0f]">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between px-3 py-2 text-sm hover:bg-neutral-900/60"
-      >
-        <span className="font-medium text-neutral-200">Tool result</span>
-        {open ? (
-          <ChevronUp className="h-4 w-4 text-neutral-400" />
-        ) : (
-          <ChevronDown className="h-4 w-4 text-neutral-400" />
-        )}
-      </button>
-      {open && (
-        <pre className="overflow-x-auto whitespace-pre-wrap px-3 pb-3 text-xs text-neutral-300">
-{JSON.stringify(data, null, 2)}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-function RichText({ content }: { content: string }) {
-  const lines = content.split("\n");
-  return (
-    <div className="prose prose-invert max-w-none prose-p:my-3 prose-li:my-1 prose-strong:text-neutral-100 prose-headings:tracking-tight prose-h2:mb-2 prose-h2:mt-0 prose-h2:text-xl prose-h3:text-lg">
-      {lines.map((l, i) => {
-        if (l.startsWith("## ")) return <h2 key={i}>{l.slice(3)}</h2>;
-        if (l.startsWith("- "))
-          return (
-            <ul key={i} className="my-2 list-disc pl-6">
-              <li>{l.slice(2)}</li>
-            </ul>
-          );
-        return <p key={i}>{l}</p>;
-      })}
-    </div>
-  );
-}
-
-function SidebarButton({
-  label,
-  accent = false,
-  onClick = () => {},
-}: {
-  label: string;
-  accent?: boolean;
-  onClick?: any;
-}) {
-  let Icon = MessageSquare;
-  if (label.toLowerCase().startsWith("new")) Icon = Plus;
-  else if (label.toLowerCase().startsWith("search")) Icon = Search;
-
-  return (
-    <button
-      className={`mb-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-neutral-900 cursor-pointer ${
-        accent ? "border border-neutral-800 bg-[#151515] text-neutral-100" : "text-neutral-300"
-      }`}
-      onClick={onClick}
-    >
-      <span
-        className={`inline-flex h-6 w-6 items-center justify-center rounded-md ${accent ? "" : "bg-neutral-700/60"}`}
-        style={accent ? { background: ACCENT } : undefined}
-      >
-        <MessageSquare className="h-3 w-3" />
-      </span>
-      {label}
-    </button>
-  );
-}
-
-function RecentItem({
-  title,
-  active = false,
-  handleChangeConvo = () => {},
-  handleDeleteConvo = () => {},
-}: {
-  title: string;
-  active?: boolean;
-  handleChangeConvo?: any;
-  handleDeleteConvo?: any;
-}) {
-  return (
-    <button
-      className={`group flex w-full cursor-pointer items-center justify-between rounded-xl px-3 py-2 text-sm ${
-        active ? "bg-neutral-900/70" : "hover:bg-neutral-900/50"
-      }`}
-      onClick={handleChangeConvo}
-    >
-      <span className="truncate text-neutral-300">{title}</span>
-      <span
-        className="opacity-0 transition-opacity group-hover:opacity-100 hover:opacity-50"
-        onClick={(e) => {
-          e.stopPropagation();
-          handleDeleteConvo();
-        }}
-      >
-        <TrashIcon className="h-4 w-4 text-neutral-500" />
-      </span>
-    </button>
-  );
-}
-
-/* ------------------------------ Search UI ------------------------------- */
-
-function SearchModal({
-  query,
-  onQueryChange,
-  results,
-  onSelect,
-  onClose,
-}: {
-  query: string;
-  onQueryChange: (v: string) => void;
-  results: Thread[];
-  onSelect: (id: string) => void;
-  onClose: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4">
-      <div className="mt-20 w-full max-w-xl rounded-2xl border border-neutral-800 bg-[#121212] shadow-xl">
-        <div className="flex items-center gap-2 border-b border-neutral-800 px-4 py-3">
-          <Search className="h-4 w-4 text-neutral-400" />
-          <input
-            autoFocus
-            value={query}
-            onChange={(e) => onQueryChange(e.target.value)}
-            placeholder="Search claims by title…"
-            className="w-full bg-transparent text-sm outline-none placeholder:text-neutral-500"
-          />
-          <button
-            onClick={onClose}
-            className="rounded-md p-1 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
-          >
-            <CloseIcon className="h-4 w-4" />
-          </button>
-        </div>
-
-        <div className="max-h-[60vh] overflow-y-auto px-2 py-2">
-          {results.length === 0 ? (
-            <div className="px-3 py-8 text-center text-sm text-neutral-500">
-              No matches
-            </div>
-          ) : (
-            results.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => onSelect(t.id)}
-                className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left hover:bg-neutral-900"
-              >
-                <div className="truncate">
-                  <div className="text-sm text-neutral-200">{t.title}</div>
-                  <div className="text-xs text-neutral-500">{t.id}</div>
-                </div>
-                {t.active ? (
-                  <span className="rounded-md border border-neutral-700 px-2 py-0.5 text-xs text-neutral-400">
-                    Active
-                  </span>
-                ) : null}
-              </button>
-            ))
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ------------------------------- Seed ----------------------------------- */
-
 function seedMessages(): Message[] {
   return [
     {
-      id: "welcome",
-      role: "assistant",
+      id: 'welcome',
+      role: 'assistant',
       content:
-        "## Welcome\nStart a claim in this thread. Create new threads in the sidebar to keep conversations separated.",
+        '## Welcome\nStart a claim in this thread. Paste a clinical note or type free text (name, SSN, diagnosis, procedures). I’ll extract, tariff and summarize cleanly.',
     },
   ];
 }
