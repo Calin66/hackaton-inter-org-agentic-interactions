@@ -23,6 +23,9 @@ export default function Page() {
     [INITIAL_THREAD_ID]: seedMessages(),
   });
 
+  // to be able to cancel the in-flight request
+  const abortRef = useRef<AbortController | null>(null);
+
   // hydrate from localStorage
   useEffect(() => {
     try {
@@ -60,7 +63,7 @@ export default function Page() {
   // auto-scroll when new messages
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
-  }, [messagesById[activeId]?.length]);
+  }, [messagesById[activeId]?.length, pending]);
 
   /* ---------------------------- Thread actions --------------------------- */
   const newId = () => Math.random().toString(36).slice(2, 10);
@@ -93,12 +96,18 @@ export default function Page() {
 
   /* ----------------------------- Networking ----------------------------- */
   async function sendToBackend(text: string, sessionId: string) {
+    // cancel any previous in-flight request
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setPending(true);
     try {
       const res = await fetch(`${API_BASE}/doctor_message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, session_id: sessionId }),
+        signal: controller.signal,
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -117,19 +126,23 @@ export default function Page() {
         ],
       }));
     } catch (e: any) {
-      setMessagesById((m) => ({
-        ...m,
-        [sessionId]: [
-          ...(m[sessionId] ?? []),
-          {
-            id: newId(),
-            role: 'assistant',
-            content: `⚠️ Sorry, I couldn't process that request.\n- ${e?.message ?? e}`,
-          },
-        ],
-      }));
+      // swallow abort error quietly, surface other errors
+      if (e?.name !== 'AbortError') {
+        setMessagesById((m) => ({
+          ...m,
+          [sessionId]: [
+            ...(m[sessionId] ?? []),
+            {
+              id: newId(),
+              role: 'assistant',
+              content: `⚠️ Sorry, I couldn't process that request.\n- ${e?.message ?? e}`,
+            },
+          ],
+        }));
+      }
     } finally {
       setPending(false);
+      abortRef.current = null;
     }
   }
 
@@ -142,6 +155,9 @@ export default function Page() {
   /* -------------------------------- Render ------------------------------- */
   return (
     <div className="h-dvh w-dvw bg-[#0f0f0f] text-neutral-200 antialiased">
+      {/* TOP LOADING BAR */}
+      <TopLoader show={pending} />
+
       <div className="grid h-full w-full grid-cols-[280px_1fr]">
         {/* Sidebar */}
         <aside className="h-full border-r border-neutral-800/80 bg-[#111111]">
@@ -180,6 +196,20 @@ export default function Page() {
 
         {/* Main chat area */}
         <main className="relative flex h-full flex-col">
+          {/* Cancel button while pending */}
+          {pending && (
+            <div className="absolute right-4 top-4 z-10">
+              <button
+                className="rounded-lg border border-neutral-800 bg-[#161616] px-3 py-1 text-sm hover:bg-[#1c1c1c]"
+                onClick={() => {
+                  abortRef.current?.abort();
+                }}
+              >
+                Stop
+              </button>
+            </div>
+          )}
+
           <div
             ref={scrollerRef}
             className="left-1/2 relative -translate-x-1/2 mt-2 h-[calc(100dvh-210px)] w-full max-w-5xl overflow-y-auto px-6 pb-6"
@@ -188,12 +218,16 @@ export default function Page() {
               {activeMessages.map((m) => (
                 <ChatMessage key={m.id} msg={m} />
               ))}
+
+              {/* Assistant typing skeleton while waiting */}
+              {pending && <AssistantTypingSkeleton />}
+
               <div className="py-8" />
             </div>
           </div>
 
           <ClaudeComposer
-            disabledd={pending}
+            disabledd={pending} // already in your code; keeps input disabled
             onSend={(text) => {
               const trimmed = (text ?? '').trim();
               if (!trimmed) return;
@@ -223,16 +257,111 @@ export default function Page() {
         />
       )}
 
+      {/* global styles incl. scrollbar + shimmer keyframes */}
       <style>{`
         * { transition: background-color .2s ease, color .2s ease, border-color .2s ease; }
         ::selection { background: ${ACCENT}66; color: white; }
         *::-webkit-scrollbar { height: 12px; width: 12px; }
         *::-webkit-scrollbar-thumb { background: #262626; border-radius: 999px; border: 3px solid #121212; }
         *::-webkit-scrollbar-track { background: transparent; }
+        @keyframes shimmer {
+          0% { background-position: -200px 0; }
+          100% { background-position: 200px 0; }
+        }
+        @keyframes indeterminate {
+          0% { left: -40%; width: 40%; }
+          50% { left: 20%; width: 60%; }
+          100% { left: 100%; width: 40%; }
+        }
       `}</style>
     </div>
   );
 }
+
+/* ------------------------------ UI bits --------------------------------- */
+
+function TopLoader({ show }: { show: boolean }) {
+  if (!show) return null;
+  return (
+    <div className="fixed inset-x-0 top-0 z-50 h-0.5 bg-transparent">
+      <div
+        className="relative h-full"
+        style={{ background: 'linear-gradient(90deg, transparent, transparent)' }}
+      >
+        <span
+          className="absolute top-0 h-0.5 rounded-r-full"
+          style={{
+            background: ACCENT,
+            animation: 'indeterminate 1.2s ease-in-out infinite',
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function AssistantTypingSkeleton() {
+  return (
+    <div
+      className="w-full rounded-2xl border border-neutral-800 bg-[#121212] px-4 py-3"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <div
+        className="mb-2 h-4 w-24 rounded"
+        style={{
+          background: 'linear-gradient(90deg, #1a1a1a 25%, #222222 37%, #1a1a1a 63%)',
+          backgroundSize: '400px 100%',
+          animation: 'shimmer 1.2s linear infinite',
+        }}
+      />
+      <div className="space-y-2">
+        <ShimmerLine w="90%" />
+        <ShimmerLine w="80%" />
+        <ShimmerLine w="60%" />
+      </div>
+      <div className="mt-3 flex items-center gap-2 text-xs text-neutral-400">
+        <TypingDots />
+        <span>Assistant is typing…</span>
+      </div>
+    </div>
+  );
+}
+
+function ShimmerLine({ w = '100%' }: { w?: string }) {
+  return (
+    <div
+      className="h-3 rounded"
+      style={{
+        width: w,
+        background: 'linear-gradient(90deg, #1a1a1a 25%, #222222 37%, #1a1a1a 63%)',
+        backgroundSize: '400px 100%',
+        animation: 'shimmer 1.2s linear infinite',
+      }}
+    />
+  );
+}
+
+function TypingDots() {
+  return (
+    <span className="inline-flex gap-1">
+      <Dot delay="0s" />
+      <Dot delay=".15s" />
+      <Dot delay=".3s" />
+    </span>
+  );
+}
+
+function Dot({ delay = '0s' }: { delay?: string }) {
+  return (
+    <span
+      className="inline-block h-1.5 w-1.5 rounded-full bg-neutral-500"
+      style={{ animation: `pulse 1s ease-in-out infinite`, animationDelay: delay }}
+    />
+  );
+}
+
+/* ------------------------------- Seed ----------------------------------- */
 
 function seedMessages(): Message[] {
   return [
