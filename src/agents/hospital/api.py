@@ -48,7 +48,7 @@ def missing_required(invoice: Dict[str, Any]) -> List[str]:
     return missing
 
 
-# ---------- NEW: helpers for saving approved claims ----------
+# ---------- Helpers for saving approved claims ----------
 def _claims_dir() -> Path:
     d = Path("data/claims")
     d.mkdir(parents=True, exist_ok=True)
@@ -79,7 +79,7 @@ def _save_claim(inv: Dict[str, Any]) -> str:
     path = _claims_dir() / fname
     path.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path)
-# ------------------------------------------------------------
+# --------------------------------------------------------
 
 def _to_insurance_claim(inv: Dict[str, Any]) -> Dict[str, Any]:
     """Map internal invoice to the insurance agent's expected JSON fields."""
@@ -142,6 +142,36 @@ def doctor_message(req: MessageRequest):
 
     sid = store.ensure(req.session_id)
     session = store.get(sid)
+
+    # ---- Early smalltalk catch (even on very first message) ----
+    try:
+        probe = interpret_doctor_message(req.message, [])
+        if probe.get("type") == "smalltalk":
+            reply = (probe.get("params") or {}).get("reply") or "Hello! How can I help with the invoice?"
+            return PendingResponse(
+                session_id=sid,
+                agent_reply=reply,
+                invoice=session.get("invoice") or {}
+            ).model_dump()
+    except Exception:
+        # If intent parsing fails for any reason, fall through to normal flow.
+        pass
+    # ------------------------------------------------------------
+
+    # ---- Early out-of-scope guard BEFORE building a draft invoice ----
+    try:
+        probe2 = interpret_doctor_message(req.message, [])
+        if probe2.get("type") == "unknown" and (probe2.get("params") or {}).get("reason") == "out_of_scope":
+            polite = (
+                "I’m a hospital **billing** assistant, so I can’t help with that topic. "
+                "I can create or adjust invoices (patient name/SSN/diagnosis), add or remove procedures, "
+                "apply discounts, set prices, and finalize approval. "
+                "What would you like to do with the current invoice?"
+            )
+            return PendingResponse(session_id=sid, agent_reply=polite, invoice=session.get("invoice") or {}).model_dump()
+    except Exception:
+        pass
+    # ------------------------------------------------------------------
 
     # First turn (or after approval/cleared session)
     if session["status"] in ("empty", "approved") or not session.get("invoice"):
@@ -294,11 +324,26 @@ def doctor_message(req: MessageRequest):
                     add_procedure_free_text(invoice, TARIFF, wanted)
 
     else:
+        # Strict guardrail: keep conversation on billing topic only
+        reason = (action.get("params") or {}).get("reason", "")
+        if reason == "out_of_scope":
+            reply = (
+                "I’m a hospital **billing** assistant, so I can’t help with that topic. "
+                "I can create or adjust invoices (patient name/SSN/diagnosis), add or remove procedures, "
+                "apply discounts, set prices, and finalize approval. "
+                "What would you like to do with the current invoice?"
+            )
+            return PendingResponse(session_id=sid, agent_reply=reply, invoice=invoice).model_dump()
+        # In-scope but unrecognized → give concrete billing examples
         status_note = (
-            "Sorry, I didn't understand. You can say: 'apply 10% discount', "
+            "I didn’t catch a billing action. You can say: 'apply 10% discount', "
             "'remove the second procedure', 'add specialist consult', "
             "'set ER visit high complexity to 1150', or 'approve'."
         )
+
+    # Friendly wrapper for status messages
+    if status_note:
+        status_note = f"✅ Got it — {status_note}"
 
     miss = missing_required(invoice)
     if miss:

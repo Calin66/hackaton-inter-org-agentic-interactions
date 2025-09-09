@@ -1,0 +1,13 @@
+{
+  "patient name": "Veronica Caplea",
+  "patient SSN": "1008291609",
+  "hospital name": "City Hospital",
+  "date of service": "2025-09-01",
+  "diagnose": "S52.501A",
+  "procedures": [
+    {
+      "name": "Physical therapy session",
+      "billed": 130
+    }
+  ]
+}
