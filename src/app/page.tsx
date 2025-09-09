@@ -7,7 +7,6 @@ import { RecentItem } from '@/components/RecentItem';
 import { ChatMessage } from '@/components/ChatMessage';
 import { SearchModal } from '@/components/SearchModal';
 import type { Message, Thread } from '@/types';
-import { parseInvoiceFromText, mergeToolResults } from '@/lib/invoice/parse';
 
 /* ----------------------------- Constants -------------------------------- */
 const ACCENT = '#c8643c';
@@ -47,7 +46,7 @@ function normalizeResponse(json: any): {
   text: string;
   tool: any;
   status?: 'pending' | 'approved';
-  meta?: { file_path?: string };
+  meta?: { file_path?: string; session_id?: string };
 } {
   // NEW: pending
   if (json && json.status === 'pending') {
@@ -56,6 +55,7 @@ function normalizeResponse(json: any): {
       text: pr.agent_reply ?? '',
       tool: pr.invoice ?? null,
       status: 'pending',
+      meta: { session_id: pr.session_id },
     };
   }
 
@@ -69,7 +69,7 @@ function normalizeResponse(json: any): {
         `Here is the final invoice JSON below.`,
       tool: ar.final_json ?? null,
       status: 'approved',
-      meta: { file_path: ar.file_path },
+      meta: { file_path: ar.file_path, session_id: ar.session_id },
     };
   }
 
@@ -89,6 +89,9 @@ export default function Page() {
     [INITIAL_THREAD_ID]: seedMessages(),
   });
 
+  // 👇 NEW: map threadId -> server session_id
+  const [serverSessionByThread, setServerSessionByThread] = useState<Record<string, string>>({});
+
   // to be able to cancel the in-flight request
   const abortRef = useRef<AbortController | null>(null);
 
@@ -97,11 +100,16 @@ export default function Page() {
     try {
       const rawT = localStorage.getItem('threads');
       const rawM = localStorage.getItem('messagesById');
+      const rawS = localStorage.getItem('serverSessionByThread'); // 👈 NEW
       if (rawT && rawM) {
         const parsedT: Thread[] = JSON.parse(rawT);
         const parsedM: Record<string, Message[]> = JSON.parse(rawM);
         if (Array.isArray(parsedT) && parsedT.length) setThreads(parsedT);
         if (parsedM && typeof parsedM === 'object') setMessagesById(parsedM);
+      }
+      if (rawS) {
+        const parsedS = JSON.parse(rawS);
+        if (parsedS && typeof parsedS === 'object') setServerSessionByThread(parsedS);
       }
     } catch {
       /* ignore */
@@ -113,10 +121,11 @@ export default function Page() {
     try {
       localStorage.setItem('threads', JSON.stringify(threads));
       localStorage.setItem('messagesById', JSON.stringify(messagesById));
+      localStorage.setItem('serverSessionByThread', JSON.stringify(serverSessionByThread)); // 👈 NEW
     } catch {
       /* ignore */
     }
-  }, [threads, messagesById]);
+  }, [threads, messagesById, serverSessionByThread]);
 
   const activeId = useMemo(() => threads.find((t) => t.active)?.id ?? threads[0].id, [threads]);
   const activeMessages = messagesById[activeId] ?? [];
@@ -145,6 +154,12 @@ export default function Page() {
       return [...next, { id, title: `Claim ${next.length + 1}`, active: true }];
     });
     setMessagesById((prev) => ({ ...prev, [id]: seedMessages() }));
+    // 👇 ensure there's no leftover session_id for the new thread
+    setServerSessionByThread((m) => {
+      const copy = { ...m };
+      delete copy[id];
+      return copy;
+    });
   }
 
   function handleDeleteConvo(id: string) {
@@ -152,17 +167,19 @@ export default function Page() {
       const filtered = prev.filter((t) => t.id !== id);
       if (!filtered.length) {
         setMessagesById({ [INITIAL_THREAD_ID]: seedMessages() });
+        // reset sessions as well
+        setServerSessionByThread({});
         return [{ id: INITIAL_THREAD_ID, title: 'Claim 1', active: true }];
       }
       if (prev.find((t) => t.id === id)?.active) filtered[0].active = true;
       return filtered;
     });
     setMessagesById(({ [id]: _drop, ...rest }) => rest);
+    setServerSessionByThread(({ [id]: _sdrop, ...srest }) => srest); // 👈 drop mapping for deleted thread
   }
 
   /* ----------------------------- Networking ----------------------------- */
-  // --- Replace your sendToBackend with this ---
-  async function sendToBackend(text: string, sessionId: string) {
+  async function sendToBackend(text: string, threadId: string) {
     // cancel any previous in-flight request
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -170,10 +187,11 @@ export default function Page() {
 
     setPending(true);
     try {
+      const serverSid = serverSessionByThread[threadId] ?? null; // 👈 use saved session_id (or start new)
       const res = await fetch(`${API_BASE}/doctor_message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, session_id: sessionId }),
+        body: JSON.stringify({ message: text, session_id: serverSid }),
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -182,21 +200,25 @@ export default function Page() {
       }
 
       const json = await res.json();
+
+      // 👇 IMPORTANT: remember server session_id for this thread
+      if (json?.session_id) {
+        setServerSessionByThread((m) => ({ ...m, [threadId]: json.session_id }));
+      }
+
       const { text: assistantText, tool, status, meta } = normalizeResponse(json);
 
-      // If you want to keep using your existing ChatMessage tool pane,
-      // store the invoice under `tool_result` (no need to change ChatMessage).
       setMessagesById((m) => ({
         ...m,
-        [sessionId]: [
-          ...(m[sessionId] ?? []),
+        [threadId]: [
+          ...(m[threadId] ?? []),
           {
             id: newId(),
             role: 'assistant',
             content: assistantText ?? '',
-            tool_result: tool, // <- structured invoice lives here
-            status, // <- optional: can show a badge in ChatMessage
-            meta, // <- optional: contains file_path on approval
+            tool_result: tool,
+            status,
+            meta,
           } as any,
         ],
       }));
@@ -204,8 +226,8 @@ export default function Page() {
       if (e?.name !== 'AbortError') {
         setMessagesById((m) => ({
           ...m,
-          [sessionId]: [
-            ...(m[sessionId] ?? []),
+          [threadId]: [
+            ...(m[threadId] ?? []),
             {
               id: newId(),
               role: 'assistant',
@@ -301,7 +323,7 @@ export default function Page() {
           </div>
 
           <ClaudeComposer
-            disabledd={pending} // already in your code; keeps input disabled
+            disabledd={pending}
             onSend={(text) => {
               const trimmed = (text ?? '').trim();
               if (!trimmed) return;
@@ -312,7 +334,7 @@ export default function Page() {
                   { id: newId(), role: 'user', content: trimmed },
                 ],
               }));
-              sendToBackend(trimmed, activeId);
+              sendToBackend(trimmed, activeId); // threadId stays UI-only; mapping holds real session_id
             }}
           />
         </main>
