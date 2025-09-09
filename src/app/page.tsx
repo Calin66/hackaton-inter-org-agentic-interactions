@@ -15,6 +15,72 @@ const NEXT_PUBLIC_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localho
 const API_BASE = NEXT_PUBLIC_API_BASE.replace(/\/$/, '');
 const INITIAL_THREAD_ID = 't-1'; // deterministic for SSR
 
+type Procedure = { name: string; billed: number };
+type Invoice = {
+  'patient name': string;
+  'patient SSN': string;
+  'hospital name': string;
+  'date of service': string;
+  diagnose: string;
+  procedures: Procedure[];
+};
+
+type PendingResponse = {
+  session_id: string;
+  status: 'pending';
+  agent_reply: string;
+  invoice: Invoice;
+};
+
+type ApprovedResponse = {
+  session_id: string;
+  status: 'approved';
+  final_json: Invoice;
+  file_path: string;
+  // backend doesn't include agent_reply here, so we synthesize a message
+};
+
+// Accept both new and legacy shapes
+type LegacyResponse = { message?: string; tool_result?: any };
+
+function normalizeResponse(json: any): {
+  text: string;
+  tool: any;
+  status?: 'pending' | 'approved';
+  meta?: { file_path?: string };
+} {
+  // NEW: pending
+  if (json && json.status === 'pending') {
+    const pr = json as PendingResponse;
+    return {
+      text: pr.agent_reply ?? '',
+      tool: pr.invoice ?? null,
+      status: 'pending',
+    };
+  }
+
+  // NEW: approved
+  if (json && json.status === 'approved') {
+    const ar = json as ApprovedResponse;
+    return {
+      text:
+        `✅ Claim approved and saved.\n\n` +
+        (ar.file_path ? `Saved to: ${ar.file_path}\n\n` : '') +
+        `Here is the final invoice JSON below.`,
+      tool: ar.final_json ?? null,
+      status: 'approved',
+      meta: { file_path: ar.file_path },
+    };
+  }
+
+  // LEGACY fallback
+  const lr = json as LegacyResponse;
+  return {
+    text: lr.message ?? '',
+    tool: lr.tool_result ?? null,
+  };
+}
+
 export default function Page() {
   const [threads, setThreads] = useState<Thread[]>([
     { id: INITIAL_THREAD_ID, title: 'Claim 1', active: true },
@@ -95,6 +161,7 @@ export default function Page() {
   }
 
   /* ----------------------------- Networking ----------------------------- */
+  // --- Replace your sendToBackend with this ---
   async function sendToBackend(text: string, sessionId: string) {
     // cancel any previous in-flight request
     abortRef.current?.abort();
@@ -113,20 +180,27 @@ export default function Page() {
         const err = await res.json().catch(() => ({}));
         throw new Error(err?.detail || `Request failed with ${res.status}`);
       }
-      const data: { message: string; tool_result?: any } = await res.json();
 
-      const parsed = parseInvoiceFromText(data.message ?? '');
-      const mergedTool = mergeToolResults(data.tool_result, parsed);
+      const json = await res.json();
+      const { text: assistantText, tool, status, meta } = normalizeResponse(json);
 
+      // If you want to keep using your existing ChatMessage tool pane,
+      // store the invoice under `tool_result` (no need to change ChatMessage).
       setMessagesById((m) => ({
         ...m,
         [sessionId]: [
           ...(m[sessionId] ?? []),
-          { id: newId(), role: 'assistant', content: data.message ?? '', tool_result: mergedTool },
+          {
+            id: newId(),
+            role: 'assistant',
+            content: assistantText ?? '',
+            tool_result: tool, // <- structured invoice lives here
+            status, // <- optional: can show a badge in ChatMessage
+            meta, // <- optional: contains file_path on approval
+          } as any,
         ],
       }));
     } catch (e: any) {
-      // swallow abort error quietly, surface other errors
       if (e?.name !== 'AbortError') {
         setMessagesById((m) => ({
           ...m,
