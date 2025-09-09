@@ -109,8 +109,9 @@ def generate_missing_prompt(invoice: Dict[str, Any], missing_keys: List[str]) ->
     return resp.choices[0].message.content.strip()
 
 # ------------------ Natural language intent parsing ------------------
+# --- replace the existing INTENT_SYSTEM in llm.py ---
 INTENT_SYSTEM = """
-You convert a doctor's free-text message into a structured ACTION for a billing assistant.
+You convert a doctor's free-text message into a structured ACTION for a hospital billing assistant.
 
 You MUST return STRICT JSON with keys:
 - type: one of [approve, add_procedure, remove_procedure_by_index, remove_procedure_by_name, discount_percent, set_price, provide_fields, smalltalk, unknown]
@@ -127,18 +128,20 @@ You MUST return STRICT JSON with keys:
         "diagnose": string (optional), 
         "procedures": array of strings (optional)
     }
-  - for smalltalk: { "reply": string }  # greetings, hellos, how-are-you, thanks, etc.
+  - for smalltalk: { "reply": string }  # brief greeting/ack within billing context
   - for unknown: { "reason": string }
 
+SCOPE POLICY:
+- The assistant is ONLY for hospital billing tasks: drafting/adjusting/approving invoices, patient identifiers, diagnosis strings, procedures, prices/discounts.
+- If the message is not related to billing (e.g., weather, jokes, clinical advice, medical Q&A, tech troubleshooting, legal/coverage advice), return type="unknown" with reason="out_of_scope".
+- If it's a pure greeting/thanks, return type="smalltalk" with a short reply that invites a billing action.
+
 RULES:
-- Greetings and pleasantries like "hello", "hi", "hey", "good morning", "how are you?", "thanks" should return type=smalltalk with a short, warm reply inviting the doctor to say what they need help with.
-- If the message expresses approval (e.g., "i confirm, the data is correct", "looks good, send it"), use type=approve.
-- If the message asks to remove by position (e.g., "remove the second procedure"), use remove_procedure_by_index.
-- If the message names a specific procedure to remove, use remove_procedure_by_name.
-- If the message contains a percent discount (e.g., "apply 10% discount", "discount 15"), use discount_percent.
-- If the message sets a price (e.g., "set ER visit to 1150"), use set_price.
-- If the message provides patient fields (name, SSN, diagnose, procedures), use provide_fields and fill only what you can confidently extract.
-- If none of the above, use unknown and give a short reason.
+- Approval/discount/price/procedure edits map to their respective types.
+- If the message provides patient fields or procedures, use provide_fields.
+- Position-based removal → remove_procedure_by_index.
+- Name-based removal → remove_procedure_by_name.
+- If none of the above AND in scope, use unknown with a brief reason; if clearly out of scope, use reason="out_of_scope".
 
 Return ONLY the JSON object. No commentary.
 """
@@ -158,7 +161,11 @@ def interpret_doctor_message(message: str, current_lines: List[str]) -> Dict[str
             {"msg": "i confirm, the data is correct", "expect": {"type":"approve","params":{}}},
             {"msg": "apply a 10% discount", "expect": {"type":"discount_percent","params":{"percent":10}}},
             {"msg": "delete x-ray forearm", "expect": {"type":"remove_procedure_by_name","params":{"name":"X-ray forearm"}}},
-            {"msg": "set ER visit high complexity to 1150", "expect": {"type":"set_price","params":{"name":"ER visit high complexity","amount":1150}}}
+            {"msg": "set ER visit high complexity to 1150", "expect": {"type":"set_price","params":{"name":"ER visit high complexity","amount":1150}}},
+            {"msg": "what's the weather in Bucharest?", "expect": {"type":"unknown","params":{"reason":"out_of_scope"}}},
+            {"msg": "tell me a joke", "expect": {"type":"unknown","params":{"reason":"out_of_scope"}}},
+            {"msg": "how to treat pneumonia?", "expect": {"type":"unknown","params":{"reason":"out_of_scope"}}}
+            
         ]
     }
     resp = client.chat.completions.create(

@@ -77,8 +77,7 @@ uvicorn src.agents.hospital.api:app --reload --port 8000
 
 ```powershell
 Invoke-RestMethod -Uri "http://localhost:8000/doctor_message" `
->>   -Method Post -ContentType "application/json" `
->>   -Body '{"session_id": null, "message": "Full name Mark Johnson, SSN 328291609, City Hospital on 2025-09-01. Diagnose S52.501A. Procedures: ER visit high complexity; X-ray forearm."}' `
->> | Select-Object session_id, agent_reply | ConvertTo-Json -Depth 100
-
+   -Method Post -ContentType "application/json" `
+   -Body '{"session_id": null, "message": "Full name Mark Johnson, SSN 328291609, City Hospital on 2025-09-01. Diagnose S52.501A. Procedures: ER visit high complexity; X-ray forearm."}' `
+ | Select-Object session_id, agent_reply | ConvertTo-Json -Depth 100
 ```
