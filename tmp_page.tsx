@@ -1,9 +1,8 @@
-'use client';
+﻿'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ClaudeComposer } from '@/components/Composer';
 import { SidebarButton } from '@/components/SidebarButton';
-import Link from 'next/link';
 import { RecentItem } from '@/components/RecentItem';
 import { ChatMessage } from '@/components/ChatMessage';
 import { SearchModal } from '@/components/SearchModal';
@@ -48,20 +47,16 @@ function normalizeResponse(json: any): {
   text: string;
   tool: any;
   status?: 'pending' | 'approved';
-  meta?: { file_path?: string; insurance_pending?: any };
+  meta?: { file_path?: string };
 } {
-  // NEW: pending (include insurance_pending if present)
+  // NEW: pending
   if (json && json.status === 'pending') {
     const pr = json as PendingResponse;
-    const base = {
-      text: (pr as any).agent_reply ?? '',
-      tool: (pr as any).invoice ?? null,
-      status: 'pending' as const,
+    return {
+      text: pr.agent_reply ?? '',
+      tool: pr.invoice ?? null,
+      status: 'pending',
     };
-    if ((json as any).insurance_pending) {
-      return { ...base, meta: { insurance_pending: (json as any).insurance_pending } };
-    }
-    return base;
   }
 
   // NEW: approved
@@ -69,23 +64,13 @@ function normalizeResponse(json: any): {
     const ar = json as ApprovedResponse;
     return {
       text:
-        `✅ Claim approved and saved.\n\n` +
+        `âœ… Claim approved and saved.\n\n` +
         (ar.file_path ? `Saved to: ${ar.file_path}\n\n` : '') +
         `Here is the final invoice JSON below.`,
       tool: ar.final_json ?? null,
       status: 'approved',
       meta: { file_path: ar.file_path },
     };
-  }
-
-  // Enrich with insurance pending (if present) for non-status responses
-  if (json && json.insurance_pending) {
-    return {
-      text: json.agent_reply ?? '',
-      tool: json.invoice ?? null,
-      status: 'pending',
-      meta: { insurance_pending: json.insurance_pending },
-    } as any;
   }
 
   // LEGACY fallback
@@ -140,18 +125,6 @@ export default function Page() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const { approve, deny } = useMemo(
-    () => useInsuranceActions(threads, setThreads as any, messagesById, setMessagesById as any),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [threads, messagesById]
-  );
-
-  function handleApproveInsurance(threadId: string, sessionId: string, messageId: string) {
-    approve(threadId, sessionId, messageId);
-  }
-  function handleDenyInsurance(threadId: string, sessionId: string, messageId: string) {
-    deny(threadId, sessionId, messageId);
-  }
 
   // auto-scroll when new messages
   useEffect(() => {
@@ -227,11 +200,6 @@ export default function Page() {
           } as any,
         ],
       }));
-
-      // If insurance pending arrived, set sidebar status = pending for this thread
-      if (meta && (meta as any).insurance_pending) {
-        setThreads((ts) => ts.map((t) => (t.id === sessionId ? { ...t, insuranceStatus: 'pending' } : t)));
-      }
     } catch (e: any) {
       if (e?.name !== 'AbortError') {
         setMessagesById((m) => ({
@@ -241,7 +209,7 @@ export default function Page() {
             {
               id: newId(),
               role: 'assistant',
-              content: `⚠️ Sorry, I couldn't process that request.\n- ${e?.message ?? e}`,
+              content: `âš ï¸ Sorry, I couldn't process that request.\n- ${e?.message ?? e}`,
             },
           ],
         }));
@@ -281,9 +249,6 @@ export default function Page() {
                   setSearchOpen(true);
                 }}
               />
-              <Link href="/request" className="block">
-                <SidebarButton label="Requests" />
-              </Link>
             </nav>
 
             <div className="mt-6 px-4 text-xs uppercase tracking-wider text-neutral-400">
@@ -295,7 +260,6 @@ export default function Page() {
                   key={t.id}
                   title={t.title}
                   active={t.active}
-                  status={(t as any).insuranceStatus ?? null}
                   handleChangeConvo={() => handleChangeConvo(t.id)}
                   handleDeleteConvo={() => handleDeleteConvo(t.id)}
                 />
@@ -326,30 +290,7 @@ export default function Page() {
           >
             <div className="max-w-3xl space-y-6 left-1/2 relative -translate-x-1/2 mt-10">
               {activeMessages.map((m) => (
-                <ChatMessage
-                  key={m.id}
-                  msg={m}
-                  onApproveInsurance={
-                    (m as any)?.meta?.insurance_pending?.policy_valid === true
-                      ? () =>
-                          handleApproveInsurance(
-                            activeId,
-                            ((m as any)?.meta?.insurance_pending as any)?.session_id || activeId,
-                            m.id
-                          )
-                      : undefined
-                  }
-                  onDenyInsurance={
-                    (m as any)?.meta?.insurance_pending?.policy_valid === true
-                      ? () =>
-                          handleDenyInsurance(
-                            activeId,
-                            ((m as any)?.meta?.insurance_pending as any)?.session_id || activeId,
-                            m.id
-                          )
-                      : undefined
-                  }
-                />
+                <ChatMessage key={m.id} msg={m} />
               ))}
 
               {/* Assistant typing skeleton while waiting */}
@@ -455,7 +396,7 @@ function AssistantTypingSkeleton() {
       </div>
       <div className="mt-3 flex items-center gap-2 text-xs text-neutral-400">
         <TypingDots />
-        <span>Assistant is typing…</span>
+        <span>Assistant is typingâ€¦</span>
       </div>
     </div>
   );
@@ -502,96 +443,7 @@ function seedMessages(): Message[] {
       id: 'welcome',
       role: 'assistant',
       content:
-        '## Welcome\nStart a claim in this thread. Paste a clinical note or type free text (name, SSN, diagnosis, procedures). I’ll extract, tariff and summarize cleanly.',
+        '## Welcome\nStart a claim in this thread. Paste a clinical note or type free text (name, SSN, diagnosis, procedures). Iâ€™ll extract, tariff and summarize cleanly.',
     },
   ];
-}
-
-/* ----------------------- Insurance approval handlers -------------------- */
-
-async function postJSON(url: string, body: any) {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail || `Request failed with ${res.status}`);
-  }
-  return res.json();
-}
-
-function useInsuranceActions(
-  threads: Thread[],
-  setThreads: React.Dispatch<React.SetStateAction<Thread[]>>,
-  messagesById: Record<string, Message[]>,
-  setMessagesById: React.Dispatch<React.SetStateAction<Record<string, Message[]>>>
-) {
-  const newId = () => Math.random().toString(36).slice(2, 10);
-
-  async function approve(threadId: string, sessionId: string, messageId: string) {
-    const data = await postJSON(`${API_BASE}/approve_insurance`, {
-      session_id: sessionId,
-      decision: 'approve',
-    });
-
-    // Append a single approved insurance reply (with badge) and clear approval card
-    setMessagesById((m) => {
-      const msgs = (m[threadId] ?? []).map((mm) =>
-        mm.id === messageId ? { ...mm, meta: undefined } : mm
-      );
-      const tool = (data as any)?.insurance_tool_result ?? null;
-      const rj = tool?.result_json ?? {};
-      const payable = typeof rj.total_payable === 'number' ? rj.total_payable : null;
-      const policyId = rj.policy_id ?? '';
-      const totalStr = payable != null ? `$${payable.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-';
-      const header = `## Insurance Decision (Approved)`;
-      const lines = [header, `Policy: ${policyId || '—'}`, `Total payable: ${totalStr}`];
-      const content = lines.join('\n');
-      return {
-        ...m,
-        [threadId]: [
-          ...msgs,
-          {
-            id: newId(),
-            role: 'assistant',
-            content,
-            tool_result: tool,
-            status: 'approved',
-          } as any,
-        ],
-      };
-    });
-
-    setThreads((ts) => ts.map((t) => (t.id === threadId ? { ...t, insuranceStatus: 'approved' } : t)));
-  }
-
-  async function deny(threadId: string, sessionId: string, messageId: string) {
-    await postJSON(`${API_BASE}/approve_insurance`, {
-      session_id: sessionId,
-      decision: 'deny',
-    });
-    // Remove approval card and keep indicator cleared; add a status message
-    setMessagesById((m) => {
-      const msgs = (m[threadId] ?? []).map((mm) =>
-        mm.id === messageId ? { ...mm, meta: undefined } : mm
-      );
-      return {
-        ...m,
-        [threadId]: [
-          ...msgs,
-          {
-            id: newId(),
-            role: 'assistant',
-            content: 'Insurance reply denied. The response was not posted to chat.',
-            status: 'denied',
-          } as any,
-        ],
-      };
-    });
-    setThreads((ts) => ts.map((t) => (t.id === threadId ? { ...t, insuranceStatus: 'denied' } : t)));
-  }
-
-  return { approve, deny };
 }

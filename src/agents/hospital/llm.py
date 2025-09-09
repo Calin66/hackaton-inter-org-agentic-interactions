@@ -112,7 +112,7 @@ INTENT_SYSTEM = """
 You convert a doctor's free-text message into a structured ACTION for a billing assistant.
 
 You MUST return STRICT JSON with keys:
-- type: one of [approve, add_procedure, remove_procedure_by_index, remove_procedure_by_name, discount_percent, set_price, provide_fields, smalltalk, unknown]
+- type: one of [approve, send_to_insurance, add_procedure, remove_procedure_by_index, remove_procedure_by_name, discount_percent, set_price, provide_fields, smalltalk, unknown]
 - params: an object with any of the following keys depending on type:
   - for approve: {}
   - for add_procedure: { "procedure_free_text": string }
@@ -157,7 +157,10 @@ def interpret_doctor_message(message: str, current_lines: List[str]) -> Dict[str
             {"msg": "i confirm, the data is correct", "expect": {"type":"approve","params":{}}},
             {"msg": "apply a 10% discount", "expect": {"type":"discount_percent","params":{"percent":10}}},
             {"msg": "delete x-ray forearm", "expect": {"type":"remove_procedure_by_name","params":{"name":"X-ray forearm"}}},
-            {"msg": "set ER visit high complexity to 1150", "expect": {"type":"set_price","params":{"name":"ER visit high complexity","amount":1150}}}
+            {"msg": "set ER visit high complexity to 1150", "expect": {"type":"set_price","params":{"name":"ER visit high complexity","amount":1150}}},
+            {"msg": "send to insurance", "expect": {"type":"send_to_insurance","params":{}}},
+            {"msg": "check coverage with insurance", "expect": {"type":"send_to_insurance","params":{}}},
+            {"msg": "ask insurer for adjudication", "expect": {"type":"send_to_insurance","params":{}}}
         ]
     }
     resp = client.chat.completions.create(

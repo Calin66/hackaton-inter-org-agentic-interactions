@@ -1,9 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any, List
 from pathlib import Path
 from uuid import uuid4
 import json
+import os
+import requests
 
 from .models import MessageRequest, PendingResponse, ApprovedResponse
 from .llm import (
@@ -18,7 +20,7 @@ from .billing import (
     remove_procedure_by_index, remove_procedure_by_name, set_price
 )
 from .state import store
-from .config import init_env
+from .config import init_env, INSURANCE_AGENT_URL
 
 app = FastAPI(title="Hospital Billing Agent (NLU, talkative)")
 
@@ -79,6 +81,37 @@ def _save_claim(inv: Dict[str, Any]) -> str:
     return str(path)
 # ------------------------------------------------------------
 
+def _to_insurance_claim(inv: Dict[str, Any]) -> Dict[str, Any]:
+    """Map internal invoice to the insurance agent's expected JSON fields."""
+    canon = _canonicalize_invoice(inv)
+    return {
+        "fullName": canon.get("patient name", ""),
+        "patientSSN": canon.get("patient SSN", ""),
+        "hospitalName": canon.get("hospital name", ""),
+        "dateOfService": canon.get("date of service", ""),
+        "diagnose": canon.get("diagnose", ""),
+        "procedures": canon.get("procedures", []),
+    }
+
+def _send_claim_to_insurance(inv: Dict[str, Any], conversation_id: str | None = None) -> Dict[str, Any]:
+    payload = {
+        "conversation_id": conversation_id,
+        "message": _to_insurance_claim(inv),
+    }
+    url = INSURANCE_AGENT_URL
+    try:
+        resp = requests.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        # Expect schema of ChatResponse: { conversation_id, reply, tool_result }
+        return {
+            "conversation_id": data.get("conversation_id") or conversation_id or "",
+            "reply": data.get("reply", ""),
+            "tool_result": data.get("tool_result"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed contacting Insurance Agent: {e}")
+
 
 @app.on_event("startup")
 def _startup():
@@ -117,7 +150,35 @@ def doctor_message(req: MessageRequest):
         session.update({"status": "pending", "invoice": invoice})
         store.upsert(sid, session)
 
+        # If the doctor intended to send to insurance immediately and we have required fields, do it now
+        try:
+            intent = interpret_doctor_message(req.message, [p.get("name", "") for p in invoice.get("procedures", [])])
+        except Exception:
+            intent = {"type": "unknown"}
+
         miss = missing_required(invoice)
+        if intent.get("type") == "send_to_insurance" and not miss:
+            ins = _send_claim_to_insurance(invoice, conversation_id=session.get("insurance_conversation_id"))
+            session["insurance_conversation_id"] = ins.get("conversation_id") or session.get("insurance_conversation_id")
+            tool = ins.get("tool_result") or {}
+            result_json = (tool or {}).get("result_json") or {}
+            policy_valid = bool(result_json.get("eligible") and result_json.get("policy_id"))
+            session["insurance_reply"] = {"text": ins.get("reply", ""), "tool_result": tool, "policy_valid": policy_valid}
+            session["insurance_status"] = "received"
+            store.upsert(sid, session)
+            out = PendingResponse(
+                session_id=sid,
+                agent_reply=(
+                    "Sent the claim to the insurance agent. An answer was received and is awaiting your approval."
+                ),
+                invoice=invoice,
+            ).model_dump()
+            enriched = dict(session["insurance_reply"] or {})
+            enriched["session_id"] = sid
+            out["insurance_pending"] = enriched
+            return out
+
+        # Otherwise proceed as usual: either ask for missing fields or present draft
         if miss:
             reply = generate_missing_prompt(invoice, miss)
         else:
@@ -159,6 +220,40 @@ def doctor_message(req: MessageRequest):
         session.update({"status": "approved", "invoice": invoice})
         store.upsert(sid, session)
         return ApprovedResponse(session_id=sid, final_json=_canonicalize_invoice(invoice), file_path=file_path).model_dump()
+
+    elif atype == "send_to_insurance":
+        # Ensure minimal required fields are there before sending
+        miss = missing_required(invoice)
+        if miss:
+            reply = generate_missing_prompt(invoice, miss)
+            session.update({"status": "pending", "invoice": invoice})
+            store.upsert(sid, session)
+            return PendingResponse(session_id=sid, agent_reply=reply, invoice=invoice).model_dump()
+
+        # Send to insurance agent and store pending insurance reply (requires human approval)
+        ins = _send_claim_to_insurance(invoice, conversation_id=session.get("insurance_conversation_id"))
+        # Persist insurance conversation id/thread so subsequent messages thread correctly
+        session["insurance_conversation_id"] = ins.get("conversation_id") or session.get("insurance_conversation_id")
+        tool = ins.get("tool_result") or {}
+        result_json = (tool or {}).get("result_json") or {}
+        policy_valid = bool(result_json.get("eligible") and result_json.get("policy_id"))
+        session["insurance_reply"] = {"text": ins.get("reply", ""), "tool_result": tool, "policy_valid": policy_valid}
+        session["insurance_status"] = "received"  # awaiting human approval
+        store.upsert(sid, session)
+
+        # Tell UI there is an insurance answer waiting for approval
+        out = PendingResponse(
+            session_id=sid,
+            agent_reply=(
+                "Sent the claim to the insurance agent. An answer was received and is awaiting your approval."
+            ),
+            invoice=invoice,
+        ).model_dump()
+        # Enrich response with meta the UI can use for approval card
+        enriched = dict(session["insurance_reply"] or {})
+        enriched["session_id"] = sid
+        out["insurance_pending"] = enriched
+        return out
 
     elif atype == "discount_percent":
         pct = float(params.get("percent", 0))
@@ -219,3 +314,75 @@ def doctor_message(req: MessageRequest):
     session.update({"status": "pending", "invoice": invoice})
     store.upsert(sid, session)
     return PendingResponse(session_id=sid, agent_reply=reply, invoice=invoice).model_dump()
+
+
+@app.post("/approve_insurance")
+def approve_insurance(payload: Dict[str, Any]):
+    sid = (payload or {}).get("session_id")
+    decision = (payload or {}).get("decision")  # 'approve' | 'deny'
+    if decision not in ("approve", "deny"):
+        raise HTTPException(status_code=400, detail="decision must be 'approve' or 'deny'")
+
+    session = store.get(sid) if sid else None
+    if not session:
+        # Fallback: if exactly one pending exists, use it.
+        snap = store.snapshot()
+        received = [k for k, v in snap.items() if v.get("insurance_status") == "received" and v.get("insurance_reply")]
+        if len(received) == 1:
+            sid = received[0]
+            session = snap[sid]
+        else:
+            raise HTTPException(status_code=404, detail="Invalid session_id")
+    if not session.get("insurance_reply"):
+        raise HTTPException(status_code=409, detail="No insurance reply to approve/deny")
+
+    if decision == "deny":
+        session["insurance_status"] = "denied"
+        store.upsert(sid, session)
+        return {"session_id": sid, "status": "denied"}
+
+    # Approve path: surface the insurance reply to the chat
+    session["insurance_status"] = "approved"
+    reply = session["insurance_reply"].get("text", "")
+    tool = session["insurance_reply"].get("tool_result")
+    store.upsert(sid, session)
+    return {"session_id": sid, "status": "approved", "insurance_reply": reply, "insurance_tool_result": tool}
+
+
+@app.get("/insurance/pending")
+def list_pending_insurance():
+    all_sessions = store.snapshot()
+    pending = []
+    for sid, sess in all_sessions.items():
+        if sess.get("insurance_status") == "received" and sess.get("insurance_reply"):
+            pending.append({
+                "session_id": sid,
+                "invoice": sess.get("invoice"),
+                "insurance_reply": sess.get("insurance_reply"),
+            })
+    return {"items": pending}
+
+
+@app.get("/insurance/requests")
+def list_insurance_requests(status: str = Query("pending", pattern="^(pending|approved|denied|all)$")):
+    all_sessions = store.snapshot()
+    items = []
+    for sid, sess in all_sessions.items():
+        st = sess.get("insurance_status")
+        if status == "all" or (
+            (status == "pending" and st == "received") or
+            (status == "approved" and st == "approved") or
+            (status == "denied" and st == "denied")
+        ):
+            entry = {
+                "session_id": sid,
+                "status": st or "",
+                "invoice": sess.get("invoice"),
+                "insurance_reply": sess.get("insurance_reply"),
+            }
+            items.append(entry)
+    # For consistency, map "received" to "pending" in API response
+    for it in items:
+        if it.get("status") == "received":
+            it["status"] = "pending"
+    return {"items": items}
