@@ -8,12 +8,14 @@ type ComposerProps = {
   onSend?: (text: string) => void;
   maxRows?: number;   // default 8
   minRows?: number;   // default 1
+  disabledd?: any;
 };
 
 export function ClaudeComposer({
   onSend,
   maxRows = 8,
   minRows = 1,
+  disabledd
 }: ComposerProps) {
   const [value, setValue] = useState("");
   const [isFocused, setIsFocused] = useState(false);
@@ -37,7 +39,7 @@ export function ClaudeComposer({
     if (el.scrollHeight < minH) el.style.height = `${minH}px`;
   }, [value, minRows, maxRows]);
 
-  const disabled = value.trim().length === 0;
+  const disabled = disabledd || value.trim().length === 0;
 
   function send() {
     if (disabled) return;
