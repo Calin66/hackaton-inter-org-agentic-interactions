@@ -46,7 +46,7 @@ def build_initial_invoice(extracted: Dict[str, Any], tariff: Dict[str, float]) -
     invoice = {
         "patient name": extracted.get("patient name", ""),
         "patient SSN": extracted.get("patient SSN", ""),
-        "hospital name": extracted.get("hospital name", ""),
+        "hospital name": "City Hospital",
         "date of service": extracted.get("date of service", ""),
         "diagnose": extracted.get("diagnose", ""),
         "procedures": matched,

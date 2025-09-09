@@ -4,7 +4,6 @@ from datetime import datetime
 from openai import OpenAI
 from dotenv import load_dotenv
 
-DEFAULT_HOSPITAL = os.environ.get("HOSPITAL_NAME", "City Hospital")
 
 # ------------------ Helpers ------------------
 def normalize_ssn(ssn: str) -> str:
@@ -80,7 +79,6 @@ def extract_fields(free_text: str) -> Dict[str, Any]:
     if isinstance(procs, str):
         procs = [procs]
     data["procedures"] = [p for p in (procs or []) if isinstance(p, str) and p.strip()]
-    data["hospital name"] = DEFAULT_HOSPITAL
 
     return data
 

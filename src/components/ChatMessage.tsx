@@ -23,22 +23,77 @@ export function ChatMessage({ msg }: { msg: Message }) {
     </div>
   );
 }
-
 function RichText({ content }: { content: string }) {
-  const lines = (content ?? '').split('\n');
-  return (
-    <div className="prose prose-invert max-w-none prose-p:my-3 prose-li:my-1 prose-strong:text-neutral-100 prose-headings:tracking-tight prose-h2:mb-2 prose-h2:mt-0 prose-h2:text-xl prose-h3:text-lg">
-      {lines.map((l, i) => {
-        if (l.startsWith('## ')) return <h2 key={i}>{l.slice(3)}</h2>;
-        if (l.startsWith('### ')) return <h3 key={i}>{l.slice(4)}</h3>;
-        if (l.startsWith('- '))
-          return (
-            <ul key={i} className="my-2 list-disc pl-6">
-              <li>{l.slice(2)}</li>
-            </ul>
-          );
-        return <p key={i}>{l}</p>;
-      })}
-    </div>
-  );
+  const lines = (content ?? '').split(/\r?\n/);
+
+  const elements: React.ReactNode[] = [];
+  let listBuffer: string[] = [];
+
+  const flushList = () => {
+    if (!listBuffer.length) return;
+    elements.push(
+      <ul key={`ul-${elements.length}`} className="my-2 ml-6 list-disc text-neutral-200">
+        {listBuffer.map((item, i) => (
+          <li key={i} className="my-0.5">
+            {item}
+          </li>
+        ))}
+      </ul>
+    );
+    listBuffer = [];
+  };
+
+  lines.forEach((raw, i) => {
+    const line = raw ?? '';
+
+    // Headings
+    if (line.startsWith('## ')) {
+      flushList();
+      elements.push(
+        <h2
+          key={`h2-${i}`}
+          className="mb-2 mt-0 text-xl font-semibold tracking-tight text-neutral-100"
+        >
+          {line.slice(3)}
+        </h2>
+      );
+      return;
+    }
+    if (line.startsWith('### ')) {
+      flushList();
+      elements.push(
+        <h3 key={`h3-${i}`} className="mb-1 mt-1 text-lg font-semibold tracking-tight">
+          {line.slice(4)}
+        </h3>
+      );
+      return;
+    }
+
+    // Bullets: allow indentation + different dash chars
+    const ltrim = line.replace(/^\s+/, '');
+    if (/^[-•–]\s+/.test(ltrim)) {
+      listBuffer.push(ltrim.replace(/^[-•–]\s+/, ''));
+      return;
+    }
+
+    // Blank line = paragraph break
+    if (!line.trim()) {
+      flushList();
+      // insert a soft gap between paragraphs
+      elements.push(<div key={`br-${i}`} className="h-2" />);
+      return;
+    }
+
+    // Normal paragraph; preserve inline linebreaks if any (rare)
+    flushList();
+    elements.push(
+      <p key={`p-${i}`} className="my-1 whitespace-pre-wrap leading-relaxed">
+        {line}
+      </p>
+    );
+  });
+
+  flushList();
+
+  return <div className="prose prose-invert max-w-none">{elements}</div>;
 }
