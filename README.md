@@ -76,5 +76,8 @@ uvicorn src.agents.hospital.api:app --reload --port 8000
 ### 5. Test the agent from CLI (example with PowerShell)
 
 ```powershell
-Invoke-RestMethod -Uri "http://localhost:8000/doctor_message" -Method Post -ContentType "application/json" -Body '{"message":"Full name Mark Johnson, SSN 328291609, diagnose S52.501A, procedures: ER visit high complexity; X-ray forearm"}'
+Invoke-RestMethod -Uri "http://localhost:8000/doctor_message" `
+  -Method Post -ContentType "application/json" `
+  -Body '{"message":"Full name Mark Johnson, SSN 328291609, diagnose S52.501A, procedures: ER visit high complexity; X-ray forearm"}' `
+| Select-Object -ExpandProperty message
 ```
