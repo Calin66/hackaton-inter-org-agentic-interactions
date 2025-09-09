@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder
 from dotenv import load_dotenv
 
 from .agent import executor_for
@@ -114,10 +115,6 @@ def _extract_tool_result(result: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any
 # -------------------------
 @app.post("/doctor_message")
 def doctor_message(payload: dict = Body(...)):
-    """
-    Conversational path (agent decides which tools to call).
-    With the agent prompt, free text should still go extract->complete->summarize.
-    """
     try:
         text = (payload.get("message") or "").strip()
         if not text:
@@ -126,25 +123,23 @@ def doctor_message(payload: dict = Body(...)):
         executor = executor_for("doctor")
         result = executor.invoke({"input": text})
 
-        # Default to the agent's output text
         agent_text = result.get("output", "") or ""
 
-        # Prefer tool outputs if present
         summarize, approve = _extract_tool_result(result)
         tool_result = approve or summarize
 
-        # If we have a summary, show it verbatim
         if summarize and "summary" in summarize:
             agent_text = summarize["summary"]
 
-        # If approved, set a clear confirmation message
         if approve:
             agent_text = (
                 "Invoice approved ✅. "
                 "JSON ready for insurance is available in 'tool_result.ready_for_insurance'."
             )
 
-        return {"message": agent_text, "tool_result": tool_result}
+        # 👇 force safe serialization
+        return jsonable_encoder({"message": agent_text, "tool_result": tool_result})
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

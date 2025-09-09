@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import os
+import re
 import json
 import datetime as dt
+from difflib import get_close_matches
 from typing import Any, Dict, List, Optional
 
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, ValidationError
 
 # Load environment variables early so OPENAI_API_KEY is available
@@ -257,10 +260,39 @@ def _apply_modification_fn(
         inv.procedures = (inv.procedures or []) + [{"name": name, "billed": float(billed)}]
 
     elif action == "remove_procedure":
-        name = payload.get("name")
-        if not name:
+        target = (payload.get("name") or "").strip()
+        if not target:
             return _with_warning(draft, "missing_param", "remove_procedure requires 'name'")
-        inv.procedures = [p for p in (inv.procedures or []) if p.get("name") != name]
+
+        def norm(s: str) -> str:
+            # normalize: lowercase, strip non-alnum
+            return re.sub(r"\W+", "", (s or "").lower())
+
+        target_n = norm(target)
+        procs = inv.procedures or []
+
+        # 1) exact normalized match
+        exact_map = {norm(p.get("name", "")): p.get("name", "") for p in procs}
+        chosen = exact_map.get(target_n)
+
+        # 2) if no exact, try substring match on normalized
+        if not chosen and target_n:
+            for p in procs:
+                if target_n in norm(p.get("name", "")):
+                    chosen = p.get("name", "")
+                    break
+
+        # 3) if still no match, fuzzy closest by human name
+        if not chosen and procs:
+            names = [p.get("name", "") for p in procs]
+            cand = get_close_matches(target, names, n=1, cutoff=0.75)
+            if cand:
+                chosen = cand[0]
+
+        if not chosen:
+            return _with_warning(draft, "not_found", f"No procedure matching '{target}'")
+
+        inv.procedures = [p for p in procs if p.get("name") != chosen]
 
     elif action == "discount_invoice":
         pct = float(payload.get("percent", 0))
@@ -280,8 +312,8 @@ def _apply_modification_fn(
             return _with_warning(draft, "invalid_param", "discount_procedure requires percent > 0")
         newp: List[Dict[str, Any]] = []
         for p in (inv.procedures or []):
-            if p.get("name") == name:
-                newp.append({"name": name, "billed": round(float(p["billed"]) * (1 - pct / 100.0), 2)})
+            if (p.get("name") or "").lower() == name.lower():
+                newp.append({"name": p.get("name"), "billed": round(float(p["billed"]) * (1 - pct / 100.0), 2)})
             else:
                 newp.append(p)
         inv.procedures = newp
@@ -350,7 +382,7 @@ def _summarize_invoice_fn(draft: Dict[str, Any] | None = None) -> Dict[str, Any]
         amt = float(p.get("billed", 0) or 0)
         lines.append(f"  - {nm}: ${amt:.2f}")
 
-    footer = [ "", f"Total billed: ${total:.2f}" ]
+    footer = ["", f"Total billed: ${total:.2f}"]
 
     # Compute missing required fields to nudge clearly
     missing = []
@@ -404,7 +436,6 @@ def _approve_and_persist_fn(draft: Dict[str, Any] | None = None) -> Dict[str, An
     try:
         claim = Claim.model_validate(draft)
     except ValidationError as e:
-        # Keep state but explain why approval failed
         return _with_warning(draft, "validation_error", f"Cannot approve; validation failed: {e}")
 
     claim_id = save_claim(claim)
@@ -414,13 +445,15 @@ def _approve_and_persist_fn(draft: Dict[str, Any] | None = None) -> Dict[str, An
         "full name": claim.full_name,
         "patient SSN": claim.patient_ssn,
         "diagnose": claim.diagnose,
-        "date of service": claim.date_of_service,
+        "date of service": str(claim.date_of_service),
         "procedures": [{"name": p.name, "billed": p.billed} for p in claim.procedures],
     }
     result = {"claim_id": claim_id, "ready_for_insurance": minimal}
-    # also leave the approved claim as the current draft
-    _set_draft(json.loads(claim.model_dump_json(by_alias=True)))
-    return result
+
+    # Ensure draft has JSON-safe values (no raw date objects)
+    _set_draft(jsonable_encoder(claim.model_dump(by_alias=True)))
+
+    return jsonable_encoder(result)
 
 approve_tool = StructuredTool.from_function(
     func=_approve_and_persist_fn,

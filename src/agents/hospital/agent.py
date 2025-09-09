@@ -14,14 +14,12 @@ from .tools import _require_api_key  # reuse
 SYSTEM = SystemMessage(
     content=(
         "You are a hospital-side intake & billing agent.\n"
-        "If the doctor sends free text (not JSON), FIRST call complete_from_text to extract and fill tariffs/date, "
-        "THEN call summarize_invoice and STOP.\n"
-        "When the doctor requests a change (add/remove/discount/name/SSN/diagnosis/date), "
-        "call modify_invoice with the right action and payload, THEN call summarize_invoice and STOP.\n"
-        "Only call approve_invoice when the doctor says 'approve' and all required fields are present."
+        "If the doctor sends free text (not JSON), FIRST call complete_from_text to extract and fill tariffs/date, THEN call summarize_invoice and STOP.\n"
+        "When the doctor requests a change (add/remove/discount/name/SSN/diagnosis/date), call modify_invoice with the right action and payload, THEN call summarize_invoice and STOP.\n"
+        "Only call approve_invoice when the doctor says 'approve' and all required fields are present.\n"
+        "When removing a procedure, pass the EXACT name string you see in the current invoice summary to modify_invoice.payload.name (case-insensitive matching is allowed)."
     )
 )
-
 
 
 prompt = ChatPromptTemplate.from_messages(
@@ -59,7 +57,7 @@ def executor_for(session_id: str) -> AgentExecutor:
         memory=memory,
         verbose=False,
         max_iterations=12,              # was default (~15) – set explicitly
-        early_stopping_method="generate",
+        early_stopping_method="force",
         handle_parsing_errors=True,
         return_intermediate_steps=True # keep responses clean
     )
