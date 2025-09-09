@@ -73,6 +73,13 @@ def apply_discount(invoice: Dict[str, Any], percent: float) -> str:
         p["billed"] = round(float(p["billed"]) * (1 - percent/100.0), 2)
     return f"Applied discount of {percent}% to all procedures."
 
+def add_procedure_exact(invoice: Dict[str, Any], tariff: Dict[str, float], exact_name: str) -> str:
+    if exact_name not in tariff:
+        return f"No exact tariff named: {exact_name}"
+    billed = float(tariff[exact_name])
+    invoice["procedures"].append({"name": exact_name, "billed": billed})
+    return f"Added: {exact_name} ({billed})"
+
 def add_procedure_free_text(invoice: Dict[str, Any], tariff: Dict[str, float], free_text: str) -> str:
     match = best_tariff_match(free_text, list(tariff.keys()))
     if not match:

@@ -1,17 +1,26 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any, List
+from pathlib import Path
+from uuid import uuid4
+import json
+
 from .models import MessageRequest, PendingResponse, ApprovedResponse
-from .llm import extract_fields, interpret_doctor_message
+from .llm import (
+    extract_fields,
+    interpret_doctor_message,
+    generate_missing_prompt,
+    resolve_procedure_name,
+)
 from .billing import (
     load_tariff, build_initial_invoice, pretty_invoice,
-    apply_discount, add_procedure_free_text, remove_procedure_by_index,
-    remove_procedure_by_name, set_price
+    apply_discount, add_procedure_free_text, add_procedure_exact,
+    remove_procedure_by_index, remove_procedure_by_name, set_price
 )
 from .state import store
 from .config import init_env
 
-app = FastAPI(title="Hospital Billing Agent (NLU)")
+app = FastAPI(title="Hospital Billing Agent (NLU, talkative)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -22,8 +31,8 @@ app.add_middleware(
 )
 
 TARIFF: Dict[str, float] = {}
-
 REQUIRED_FIELDS = ["patient name", "patient SSN", "diagnose", "procedures"]
+
 
 def missing_required(invoice: Dict[str, Any]) -> List[str]:
     missing = []
@@ -36,25 +45,58 @@ def missing_required(invoice: Dict[str, Any]) -> List[str]:
                 missing.append(key)
     return missing
 
-def ask_for_missing(missing_keys: List[str]) -> str:
-    labels = {
-        "patient name": "Full Name",
-        "patient SSN": "SSN",
-        "diagnose": "Diagnose",
-        "procedures": "Procedures",
+
+# ---------- NEW: helpers for saving approved claims ----------
+def _claims_dir() -> Path:
+    d = Path("data/claims")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def _canonicalize_invoice(inv: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the invoice exactly in the required JSON structure,
+    coercing billed to int when possible (else 2-decimal float)."""
+    out: Dict[str, Any] = {
+        "patient name": inv.get("patient name", ""),
+        "patient SSN": inv.get("patient SSN", ""),
+        "hospital name": inv.get("hospital name", ""),
+        "date of service": inv.get("date of service", ""),
+        "diagnose": inv.get("diagnose", ""),
+        "procedures": [],
     }
-    items = ", ".join(labels.get(k, k) for k in missing_keys)
-    return (
-        f"Missing required information: {items}. "
-        "Please provide them in free text (e.g., "
-        "'Full name John Doe, SSN 123..., Diagnose M16.5, Procedures: ...')."
-    )
+    for p in inv.get("procedures", []):
+        billed = float(p.get("billed", 0))
+        billed = int(billed) if billed.is_integer() else round(billed, 2)
+        out["procedures"].append({"name": p.get("name", ""), "billed": billed})
+    return out
+
+def _save_claim(inv: Dict[str, Any]) -> str:
+    clean = _canonicalize_invoice(inv)
+    ssn = str(clean.get("patient SSN", "")).strip() or "unknown"
+    dos = str(clean.get("date of service", "")).replace("-", "") or "nodate"
+    fname = f"{dos}_{ssn}_{uuid4().hex[:8]}.json"
+    path = _claims_dir() / fname
+    path.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path)
+# ------------------------------------------------------------
+
 
 @app.on_event("startup")
 def _startup():
     init_env()
     global TARIFF
     TARIFF = load_tariff()
+
+
+@app.get("/hello")
+def hello():
+    return {
+        "message": (
+            "Hello! I’m your hospital billing assistant. "
+            "How can I help today—create a new invoice, add or remove procedures, "
+            "apply a discount, or finalize and approve one?"
+        )
+    }
+
 
 @app.post("/doctor_message")
 def doctor_message(req: MessageRequest):
@@ -77,7 +119,7 @@ def doctor_message(req: MessageRequest):
 
         miss = missing_required(invoice)
         if miss:
-            reply = ask_for_missing(miss)
+            reply = generate_missing_prompt(invoice, miss)
         else:
             reply = (
                 "Here is the proposed invoice based on your notes.\n\n"
@@ -99,24 +141,36 @@ def doctor_message(req: MessageRequest):
 
     status_note = None
 
+    if atype == "smalltalk":
+        reply = params.get("reply") or "Hi! How can I help with the invoice?"
+        return PendingResponse(session_id=sid, agent_reply=reply, invoice=invoice).model_dump()
+
     if atype == "approve":
         miss = missing_required(invoice)
         if miss:
-            reply = ask_for_missing(miss)
+            reply = generate_missing_prompt(invoice, miss)
             session.update({"status": "pending", "invoice": invoice})
             store.upsert(sid, session)
             return PendingResponse(session_id=sid, agent_reply=reply, invoice=invoice).model_dump()
 
+        # SAVE the approved claim to data/claims as JSON in the requested structure
+        file_path = _save_claim(invoice)
+
         session.update({"status": "approved", "invoice": invoice})
         store.upsert(sid, session)
-        return ApprovedResponse(session_id=sid, final_json=invoice).model_dump()
+        return ApprovedResponse(session_id=sid, final_json=_canonicalize_invoice(invoice), file_path=file_path).model_dump()
 
     elif atype == "discount_percent":
         pct = float(params.get("percent", 0))
         status_note = apply_discount(invoice, pct)
 
     elif atype == "add_procedure":
-        status_note = add_procedure_free_text(invoice, TARIFF, params.get("procedure_free_text", ""))
+        wanted = (params.get("procedure_free_text") or "").strip()
+        llm_choice = resolve_procedure_name(wanted, list(TARIFF.keys()))
+        if llm_choice:
+            status_note = add_procedure_exact(invoice, TARIFF, llm_choice) + " (via AI match)"
+        else:
+            status_note = add_procedure_free_text(invoice, TARIFF, wanted)
 
     elif atype == "remove_procedure_by_index":
         idx = int(params.get("index", 0))
@@ -137,7 +191,12 @@ def doctor_message(req: MessageRequest):
                 invoice[k] = extracted[k]
         if extracted.get("procedures"):
             for raw in extracted["procedures"]:
-                add_procedure_free_text(invoice, TARIFF, raw)
+                wanted = raw.strip()
+                llm_choice = resolve_procedure_name(wanted, list(TARIFF.keys()))
+                if llm_choice:
+                    add_procedure_exact(invoice, TARIFF, llm_choice)
+                else:
+                    add_procedure_free_text(invoice, TARIFF, wanted)
 
     else:
         status_note = (
@@ -148,7 +207,8 @@ def doctor_message(req: MessageRequest):
 
     miss = missing_required(invoice)
     if miss:
-        reply = (status_note + "\n" if status_note else "") + ask_for_missing(miss)
+        pre = (status_note + "\n" if status_note else "")
+        reply = pre + generate_missing_prompt(invoice, miss)
     else:
         reply = (
             (status_note + "\n\n" if status_note else "")

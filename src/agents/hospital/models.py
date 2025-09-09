@@ -28,3 +28,4 @@ class ApprovedResponse(BaseModel):
     session_id: str
     status: str = "approved"
     final_json: Dict[str, Any]
+    file_path: Optional[str] = None  # <-- NEW: path to saved claim file
