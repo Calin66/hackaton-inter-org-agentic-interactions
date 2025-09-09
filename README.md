@@ -59,7 +59,6 @@ pip install langgraph langchain langchain-openai pydantic fastapi uvicorn
 ```
 
 ### 3. Configure the OpenAI API key
-
 $env:OPENAI_API_KEY = $null
 
 Add your key to the `.env` file:
