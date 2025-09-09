@@ -14,7 +14,8 @@ type Message = {
 };
 
 const ACCENT = "#c8643c";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") ?? ""; // e.g. http://localhost:8000
+const NEXT_PUBLIC_API_BASE="http://localhost:8000"
+const API_BASE = NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") ?? ""; // e.g. http://localhost:8000
 
 export default function Page() {
   const [messages, setMessages] = useState<Message[]>(() => seedMessages());
