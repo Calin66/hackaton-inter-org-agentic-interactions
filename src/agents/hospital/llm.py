@@ -164,7 +164,7 @@ def interpret_doctor_message(message: str, current_lines: List[str]) -> Dict[str
             {"msg": "set ER visit high complexity to 1150", "expect": {"type":"set_price","params":{"name":"ER visit high complexity","amount":1150}}},
             {"msg": "send to insurance", "expect": {"type":"send_to_insurance","params":{}}},
             {"msg": "check coverage with insurance", "expect": {"type":"send_to_insurance","params":{}}},
-            {"msg": "ask insurer for adjudication", "expect": {"type":"send_to_insurance","params":{}}}
+            {"msg": "ask insurer for adjudication", "expect": {"type":"send_to_insurance","params":{}}},
             {"msg": "what's the weather in Bucharest?", "expect": {"type":"unknown","params":{"reason":"out_of_scope"}}},
             {"msg": "tell me a joke", "expect": {"type":"unknown","params":{"reason":"out_of_scope"}}},
             {"msg": "how to treat pneumonia?", "expect": {"type":"unknown","params":{"reason":"out_of_scope"}}}

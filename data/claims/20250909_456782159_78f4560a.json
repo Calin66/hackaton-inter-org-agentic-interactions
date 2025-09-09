@@ -1,0 +1,21 @@
+{
+  "patient name": "Ana Pop",
+  "patient SSN": "456782159",
+  "hospital name": "City Hospital",
+  "date of service": "2025-09-09",
+  "diagnose": "S52.501A",
+  "procedures": [
+    {
+      "name": "Physical therapy session",
+      "billed": 117
+    },
+    {
+      "name": "Occupational therapy session",
+      "billed": 126
+    },
+    {
+      "name": "Forearm fracture reduction",
+      "billed": 2100
+    }
+  ]
+}

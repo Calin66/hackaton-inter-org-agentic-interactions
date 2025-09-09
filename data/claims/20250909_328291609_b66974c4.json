@@ -1,0 +1,21 @@
+{
+  "patient name": "Mark Johnson",
+  "patient SSN": "328291609",
+  "hospital name": "City Hospital",
+  "date of service": "2025-09-09",
+  "diagnose": "S52.501A",
+  "procedures": [
+    {
+      "name": "ER visit high complexity",
+      "billed": 1200
+    },
+    {
+      "name": "X-ray forearm",
+      "billed": 300
+    },
+    {
+      "name": "Arthroscopy knee",
+      "billed": 5200
+    }
+  ]
+}
