@@ -20,8 +20,8 @@
       }
     },
     "limits": {
-      "imaging": { "perYear": 0 },
-      "er_visit": { "perYear": 0 }
+      "imaging": { "perYear": 1 },
+      "er_visit": { "perYear": 2 }
     }
   }
 ]

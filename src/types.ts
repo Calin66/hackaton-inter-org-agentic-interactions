@@ -1,13 +1,20 @@
 export type Message = {
-id: string;
-role: "assistant" | "user" | "system";
-content: string;
-ts?: string;
-tool_result?: any;
+  id: string;
+  role: "assistant" | "user" | "system";
+  content: string;
+  ts?: string;
+  tool_result?: any;
+  status?: "pending" | "approved" | string;
+  meta?: Record<string, any> | undefined;
 };
 
 
-export type Thread = { id: string; title: string; active: boolean };
+export type Thread = {
+  id: string;
+  title: string;
+  active: boolean;
+  insuranceStatus?: 'pending' | 'approved' | 'denied' | null;
+};
 
 
 export type ParsedProcedure = { name: string; units?: number; price: number; discount?: number; total?: number };

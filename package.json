@@ -4,6 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
+    "dev:web": "next dev --turbopack",
+    "dev:hospital": "python -m uvicorn src.agents.hospital.api:app --host 0.0.0.0 --port 8000 --reload",
+    "dev:insurance": "python -m uvicorn src.agents.insurance.main:app --host 0.0.0.0 --port 8001 --reload",
     "build": "next build --turbopack",
     "start": "next start",
     "lint": "eslint"
