@@ -2,7 +2,15 @@
 "use client";
 
 import { ClaudeComposer } from "@/Composer";
-import { Plus, Search, MessageSquare, TrashIcon, ChevronDown, ChevronUp } from "lucide-react";
+import {
+  Plus,
+  Search,
+  MessageSquare,
+  TrashIcon,
+  ChevronDown,
+  ChevronUp,
+  X as CloseIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 /* ------------------------------- Types ---------------------------------- */
@@ -20,33 +28,50 @@ type Thread = { id: string; title: string; active: boolean };
 /* ----------------------------- Constants -------------------------------- */
 
 const ACCENT = "#c8643c";
-const NEXT_PUBLIC_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+const NEXT_PUBLIC_API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 const API_BASE = NEXT_PUBLIC_API_BASE.replace(/\/$/, "");
+
+// IMPORTANT: deterministic ID used on the first server render
+const INITIAL_THREAD_ID = "t-1";
 
 /* -------------------------------- Page ---------------------------------- */
 
 export default function Page() {
-  // Threads (left sidebar)
-  const [threads, setThreads] = useState<Thread[]>(() => {
-    if (typeof window !== "undefined") {
-      const raw = localStorage.getItem("threads");
-      if (raw) return JSON.parse(raw);
-    }
-    return [{ id: crypto.randomUUID(), title: "Claim 1", active: true }];
+  // Deterministic, SSR-safe initial state (no random, no localStorage)
+  const [threads, setThreads] = useState<Thread[]>([
+    { id: INITIAL_THREAD_ID, title: "Claim 1", active: true },
+  ]);
+
+  const [messagesById, setMessagesById] = useState<Record<string, Message[]>>({
+    [INITIAL_THREAD_ID]: seedMessages(),
   });
 
-  // Messages keyed by thread id
-  const [messagesById, setMessagesById] = useState<Record<string, Message[]>>(() => {
-    if (typeof window !== "undefined") {
-      const raw = localStorage.getItem("messagesById");
-      if (raw) return JSON.parse(raw);
+  // After mount, hydrate from localStorage (client only)
+  useEffect(() => {
+    try {
+      const rawT = localStorage.getItem("threads");
+      const rawM = localStorage.getItem("messagesById");
+      if (rawT && rawM) {
+        const parsedT: Thread[] = JSON.parse(rawT);
+        const parsedM: Record<string, Message[]> = JSON.parse(rawM);
+        // sanity guard: ensure there's at least one thread/messages list
+        if (Array.isArray(parsedT) && parsedT.length > 0) setThreads(parsedT);
+        if (parsedM && typeof parsedM === "object") setMessagesById(parsedM);
+      }
+    } catch {
+      /* ignore localStorage parse errors */
     }
-    const only = (threads?.[0]?.id ?? crypto.randomUUID());
-    return { [only]: seedMessages() };
-  });
+  }, []);
 
-  const activeId = useMemo(() => threads.find((t) => t.active)?.id ?? threads[0].id, [threads]);
+  const activeId = useMemo(
+    () => threads.find((t) => t.active)?.id ?? threads[0].id,
+    [threads]
+  );
+
   const [pending, setPending] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
   // Auto-scroll on new messages in active thread
@@ -54,11 +79,14 @@ export default function Page() {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
   }, [messagesById[activeId]?.length]);
 
-  // Persist to localStorage
+  // Persist to localStorage (client)
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    localStorage.setItem("threads", JSON.stringify(threads));
-    localStorage.setItem("messagesById", JSON.stringify(messagesById));
+    try {
+      localStorage.setItem("threads", JSON.stringify(threads));
+      localStorage.setItem("messagesById", JSON.stringify(messagesById));
+    } catch {
+      /* ignore */
+    }
   }, [threads, messagesById]);
 
   /* ---------------------------- Thread actions --------------------------- */
@@ -67,32 +95,34 @@ export default function Page() {
     setThreads((ts) => ts.map((t) => ({ ...t, active: t.id === id })));
   }
 
+  function newId() {
+    // Generates on client after hydration, so randomness is OK here.
+    return Math.random().toString(36).slice(2, 10);
+  }
+
   function newClaim() {
+    const id = newId();
+    // 1) Activate the new thread
     setThreads((prev) => {
       const next = prev.map((t) => ({ ...t, active: false }));
-      const id = crypto.randomUUID();
       return [...next, { id, title: `Claim ${next.length + 1}`, active: true }];
     });
-    setMessagesById((map) => {
-      const id = threads.find((t) => t.active)?.id ?? Object.keys(map)[0];
-      const newId = crypto.randomUUID();
-      return { ...map, [newId]: seedMessages() };
-    });
+    // 2) Seed welcome message (always)
+    setMessagesById((prev) => ({ ...prev, [id]: seedMessages() }));
   }
 
   function handleDeleteConvo(id: string) {
     setThreads((prev) => {
       const filtered = prev.filter((t) => t.id !== id);
       if (!filtered.length) {
-        const newId = crypto.randomUUID();
-        setMessagesById({ [newId]: seedMessages() });
-        return [{ id: newId, title: "Claim 1", active: true }];
+        // recreate deterministic default thread
+        setMessagesById({ [INITIAL_THREAD_ID]: seedMessages() });
+        return [{ id: INITIAL_THREAD_ID, title: "Claim 1", active: true }];
       }
-      // If deleting active, activate first remaining
       if (prev.find((t) => t.id === id)?.active) filtered[0].active = true;
       return filtered;
     });
-    setMessagesById(({ [id]: _, ...rest }) => rest);
+    setMessagesById(({ [id]: _drop, ...rest }) => rest);
   }
 
   /* ----------------------------- Networking ----------------------------- */
@@ -114,7 +144,12 @@ export default function Page() {
         ...m,
         [sessionId]: [
           ...(m[sessionId] ?? []),
-          { id: crypto.randomUUID(), role: "assistant", content: data.message ?? "", tool_result: data.tool_result },
+          {
+            id: newId(),
+            role: "assistant",
+            content: data.message ?? "",
+            tool_result: data.tool_result,
+          },
         ],
       }));
     } catch (e: any) {
@@ -122,7 +157,13 @@ export default function Page() {
         ...m,
         [sessionId]: [
           ...(m[sessionId] ?? []),
-          { id: crypto.randomUUID(), role: "assistant", content: `⚠️ Sorry, I couldn't process that request.\n- ${e?.message ?? e}` },
+          {
+            id: newId(),
+            role: "assistant",
+            content: `⚠️ Sorry, I couldn't process that request.\n- ${
+              e?.message ?? e
+            }`,
+          },
         ],
       }));
     } finally {
@@ -131,6 +172,13 @@ export default function Page() {
   }
 
   const activeMessages = messagesById[activeId] ?? [];
+
+  // Simple local, title-only search of threads
+  const filteredThreads = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return threads;
+    return threads.filter((t) => t.title.toLowerCase().includes(q));
+  }, [searchQuery, threads]);
 
   /* -------------------------------- Render ------------------------------- */
 
@@ -148,10 +196,18 @@ export default function Page() {
 
             <nav className="px-2">
               <SidebarButton label="New claim" accent onClick={newClaim} />
-              <SidebarButton label="Search claim" />
+              <SidebarButton
+                label="Search claim"
+                onClick={() => {
+                  setSearchQuery("");
+                  setSearchOpen(true);
+                }}
+              />
             </nav>
 
-            <div className="mt-6 px-4 text-xs uppercase tracking-wider text-neutral-400">Recents</div>
+            <div className="mt-6 px-4 text-xs uppercase tracking-wider text-neutral-400">
+              Recents
+            </div>
             <div className="mt-2 space-y-1 px-2">
               {threads.map((t) => (
                 <RecentItem
@@ -190,7 +246,10 @@ export default function Page() {
               // optimistic user bubble
               setMessagesById((m) => ({
                 ...m,
-                [activeId]: [...(m[activeId] ?? []), { id: crypto.randomUUID(), role: "user", content: trimmed }],
+                [activeId]: [
+                  ...(m[activeId] ?? []),
+                  { id: newId(), role: "user", content: trimmed },
+                ],
               }));
               // server call
               sendToBackend(trimmed, activeId);
@@ -198,6 +257,20 @@ export default function Page() {
           />
         </main>
       </div>
+
+      {/* Search modal */}
+      {searchOpen ? (
+        <SearchModal
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          results={filteredThreads}
+          onClose={() => setSearchOpen(false)}
+          onSelect={(id) => {
+            handleChangeConvo(id);
+            setSearchOpen(false);
+          }}
+        />
+      ) : null}
 
       {/* Smooth transitions */}
       <style>{`
@@ -246,7 +319,11 @@ function ToolResultCard({ data }: { data: any }) {
         className="flex w-full items-center justify-between px-3 py-2 text-sm hover:bg-neutral-900/60"
       >
         <span className="font-medium text-neutral-200">Tool result</span>
-        {open ? <ChevronUp className="h-4 w-4 text-neutral-400" /> : <ChevronDown className="h-4 w-4 text-neutral-400" />}
+        {open ? (
+          <ChevronUp className="h-4 w-4 text-neutral-400" />
+        ) : (
+          <ChevronDown className="h-4 w-4 text-neutral-400" />
+        )}
       </button>
       {open && (
         <pre className="overflow-x-auto whitespace-pre-wrap px-3 pb-3 text-xs text-neutral-300">
@@ -299,7 +376,7 @@ function SidebarButton({
         className={`inline-flex h-6 w-6 items-center justify-center rounded-md ${accent ? "" : "bg-neutral-700/60"}`}
         style={accent ? { background: ACCENT } : undefined}
       >
-        <Icon className="h-3 w-3" />
+        <MessageSquare className="h-3 w-3" />
       </span>
       {label}
     </button>
@@ -338,12 +415,77 @@ function RecentItem({
   );
 }
 
+/* ------------------------------ Search UI ------------------------------- */
+
+function SearchModal({
+  query,
+  onQueryChange,
+  results,
+  onSelect,
+  onClose,
+}: {
+  query: string;
+  onQueryChange: (v: string) => void;
+  results: Thread[];
+  onSelect: (id: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4">
+      <div className="mt-20 w-full max-w-xl rounded-2xl border border-neutral-800 bg-[#121212] shadow-xl">
+        <div className="flex items-center gap-2 border-b border-neutral-800 px-4 py-3">
+          <Search className="h-4 w-4 text-neutral-400" />
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => onQueryChange(e.target.value)}
+            placeholder="Search claims by title…"
+            className="w-full bg-transparent text-sm outline-none placeholder:text-neutral-500"
+          />
+          <button
+            onClick={onClose}
+            className="rounded-md p-1 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
+          >
+            <CloseIcon className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="max-h-[60vh] overflow-y-auto px-2 py-2">
+          {results.length === 0 ? (
+            <div className="px-3 py-8 text-center text-sm text-neutral-500">
+              No matches
+            </div>
+          ) : (
+            results.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => onSelect(t.id)}
+                className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left hover:bg-neutral-900"
+              >
+                <div className="truncate">
+                  <div className="text-sm text-neutral-200">{t.title}</div>
+                  <div className="text-xs text-neutral-500">{t.id}</div>
+                </div>
+                {t.active ? (
+                  <span className="rounded-md border border-neutral-700 px-2 py-0.5 text-xs text-neutral-400">
+                    Active
+                  </span>
+                ) : null}
+              </button>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------- Seed ----------------------------------- */
 
 function seedMessages(): Message[] {
   return [
     {
-      id: "m1",
+      id: "welcome",
       role: "assistant",
       content:
         "## Welcome\nStart a claim in this thread. Create new threads in the sidebar to keep conversations separated.",
