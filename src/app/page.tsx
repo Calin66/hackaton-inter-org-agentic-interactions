@@ -233,38 +233,43 @@ export default function Page() {
 
           // Clear pending card meta and append approved message
           const aid = Math.random().toString(36).slice(2, 10);
+          let appended = false;
           setMessagesById((m) => {
-            const msgs = (m[activeId] ?? []).map((mm: any) => (mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm));
-            return {
-              ...m,
-              [activeId]: [
-                ...msgs,
-                { id: aid, role: 'assistant', content, tool_result: tool, status: 'approved' } as any,
-              ],
-            };
+            const current = m[activeId] ?? [];
+            const msgs = current.map((mm: any) => (mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm));
+            const already = msgs.some((mm: any) => (mm?.status === 'approved'));
+            const next = already ? msgs : [...msgs, { id: aid, role: 'assistant', content, tool_result: tool, status: 'approved' } as any];
+            appended = !already;
+            return { ...m, [activeId]: next };
           });
           setThreads((ts) => ts.map((t) => (t.id === activeId ? { ...t, insuranceStatus: 'approved' } : t)));
           (async () => {
             try { await dbPatchChat(activeId, { insuranceStatus: 'approved' }); } catch {}
-            try { await dbAddMessage(activeId, { id: aid, role: 'assistant', content, tool_result: tool, status: 'approved' } as any); } catch {}
+            if (appended) { try { await dbAddMessage(activeId, { id: aid, role: 'assistant', content, tool_result: tool, status: 'approved' } as any); } catch {} }
           })();
           stopped = true;
         } else if (st === 'denied') {
           const aid = Math.random().toString(36).slice(2, 10);
+          // Try to surface reason from tool_result
+          const tool = it?.insurance_reply?.tool_result ?? null;
+          const rj = (tool?.result_json ?? {}) as any;
+          const reason = (rj?.reason ? String(rj.reason) : 'No matching policy or not eligible');
+          const header = `## Insurance Decision (Denied)`;
+          const content = [header, `Reason: ${reason}`].join('\n');
+
+          let appended = false;
           setMessagesById((m) => {
-            const msgs = (m[activeId] ?? []).map((mm: any) => (mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm));
-            return {
-              ...m,
-              [activeId]: [
-                ...msgs,
-                { id: aid, role: 'assistant', content: 'Insurance denied.', status: 'denied' } as any,
-              ],
-            };
+            const current = m[activeId] ?? [];
+            const msgs = current.map((mm: any) => (mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm));
+            const already = msgs.some((mm: any) => (mm?.status === 'denied'));
+            const next = already ? msgs : [...msgs, { id: aid, role: 'assistant', content, status: 'denied', tool_result: tool } as any];
+            appended = !already;
+            return { ...m, [activeId]: next };
           });
           setThreads((ts) => ts.map((t) => (t.id === activeId ? { ...t, insuranceStatus: 'denied' } : t)));
           (async () => {
             try { await dbPatchChat(activeId, { insuranceStatus: 'denied' }); } catch {}
-            try { await dbAddMessage(activeId, { id: aid, role: 'assistant', content: 'Insurance denied.', status: 'denied' } as any); } catch {}
+            if (appended) { try { await dbAddMessage(activeId, { id: aid, role: 'assistant', content, status: 'denied', tool_result: tool } as any); } catch {} }
           })();
           stopped = true;
         }

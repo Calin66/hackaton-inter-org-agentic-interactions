@@ -488,6 +488,11 @@ def doctor_message(req: MessageRequest):
         session["insurance_status"] = "received"  # awaiting human approval
         store.upsert(sid, session)
 
+        # Auto-deny when no policy match / not eligible
+        if not policy_valid:
+            session["insurance_status"] = "denied"
+            store.upsert(sid, session)
+
         out = PendingResponse(
             session_id=sid,
             agent_reply=("Sent the claim to the insurance agent and is awaiting for approval."),
