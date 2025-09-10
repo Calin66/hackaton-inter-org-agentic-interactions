@@ -12,7 +12,7 @@ import { parseInvoiceFromText, mergeToolResults } from '@/lib/invoice/parse';
 
 /* ----------------------------- Constants -------------------------------- */
 const ACCENT = '#c8643c';
-const NEXT_PUBLIC_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8000';
+const NEXT_PUBLIC_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8002';
 const API_BASE = NEXT_PUBLIC_API_BASE.replace(/\/$/, '');
 const INITIAL_THREAD_ID = 't-1'; // deterministic for SSR
 
@@ -24,6 +24,14 @@ type Invoice = {
   'date of service': string;
   diagnose: string;
   procedures: Procedure[];
+  work_accident?: {
+    suspected?: boolean;
+    narrative?: string;
+    location?: string;
+    during_work_hours?: boolean;
+    sick_leave_days?: number;
+    happened_at?: string;
+  } | null;
 };
 
 type PendingResponse = {
@@ -48,7 +56,7 @@ function normalizeResponse(json: any): {
   text: string;
   tool: any;
   status?: 'pending' | 'approved';
-  meta?: { file_path?: string; insurance_pending?: any };
+  meta?: { file_path?: string; insurance_pending?: any; who_pays_rest?: 'patient' | 'corporation' };
 } {
   // NEW: pending (include insurance_pending if present)
   if (json && json.status === 'pending') {
@@ -59,7 +67,14 @@ function normalizeResponse(json: any): {
       status: 'pending' as const,
     };
     if ((json as any).insurance_pending) {
-      return { ...base, meta: { insurance_pending: (json as any).insurance_pending } };
+      return {
+        ...base,
+        meta: {
+          insurance_pending: (json as any).insurance_pending,
+          // hospital salvează who_pays_rest în sesiune; uneori vine și în response
+          who_pays_rest: (json as any).who_pays_rest ?? undefined,
+        },
+      };
     }
     return base;
   }
@@ -74,7 +89,7 @@ function normalizeResponse(json: any): {
         `Here is the final invoice JSON below.`,
       tool: ar.final_json ?? null,
       status: 'approved',
-      meta: { file_path: ar.file_path },
+      meta: { file_path: ar.file_path, who_pays_rest: (json as any).who_pays_rest ?? undefined },
     };
   }
 
@@ -84,7 +99,10 @@ function normalizeResponse(json: any): {
       text: json.agent_reply ?? '',
       tool: json.invoice ?? null,
       status: 'pending',
-      meta: { insurance_pending: json.insurance_pending },
+      meta: {
+        insurance_pending: json.insurance_pending,
+        who_pays_rest: json.who_pays_rest ?? undefined,
+      },
     } as any;
   }
 
@@ -155,8 +173,10 @@ export default function Page() {
   useEffect(() => {
     if (!hasPendingInsurance) return;
     let stopped = false;
+    console.log('in use effect TICK');
 
     async function tick() {
+      console.log('TICK');
       try {
         const res = await fetch(`${API_BASE}/insurance/requests?status=all`, { cache: 'no-store' });
         if (!res.ok) return;
@@ -170,7 +190,12 @@ export default function Page() {
         const st = it.status;
 
         // Skip if we've already reflected a terminal status
-        const alreadyTerminal = threads.find((t) => t.id === activeId && (t as any).insuranceStatus && (t as any).insuranceStatus !== 'pending');
+        const alreadyTerminal = threads.find(
+          (t) =>
+            t.id === activeId &&
+            (t as any).insuranceStatus &&
+            (t as any).insuranceStatus !== 'pending'
+        );
         if (alreadyTerminal) {
           stopped = true;
           return;
@@ -179,40 +204,93 @@ export default function Page() {
         if (st === 'approved') {
           const tool = it?.insurance_reply?.tool_result ?? null;
           const rj = (tool?.result_json ?? {}) as any;
+          console.log('RJ', rj);
+
+          // ...în poller, după ce ai const rj = tool?.result_json ?? {}
+          const corp = rj.corporate_meta ?? null;
+          const payer = rj.payer ?? '-';
           const payable = typeof rj.total_payable === 'number' ? rj.total_payable : null;
-          const policyId = rj.policy_id ?? '';
-          const totalStr = payable != null
-            ? `$${payable.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-            : '-';
-          const header = `## Insurance Decision (Approved)`;
-          const lines = [header, `Policy: ${policyId || '-'}`, `Total payable: ${totalStr}`];
+          const totalStr =
+            payable != null
+              ? `$${payable.toLocaleString(undefined, {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}`
+              : '-';
+
+          const lines = [
+            `## Insurance Decision (Approved)`,
+            `Policy: ${rj.policy_id || '-'}`,
+            `Total payable: ${totalStr}`,
+            `Payer (rest): ${payer}`,
+          ];
+
+          // ➕ mini-explicație de la Corporate
+          if (corp) {
+            const conf =
+              typeof corp.confidence === 'number'
+                ? ` (${Math.round(corp.confidence * 100)}% conf.)`
+                : '';
+            lines.push(
+              corp.is_work_accident
+                ? `Corporate: work accident confirmed${conf}`
+                : `Corporate: not a work accident${conf}`
+            );
+            if (corp.reason) {
+              lines.push(`Why: ${corp.reason}`);
+            }
+            // opțional: listează clauzele „pass”
+            const passed = (corp.policy_clauses || []).filter((c: any) => c?.verdict === 'pass');
+            if (passed.length) {
+              lines.push(`Clauses: ${passed.map((c: any) => c.id).join(', ')}`);
+            }
+          }
           const content = lines.join('\n');
 
           // Clear pending card meta and append approved message
           setMessagesById((m) => {
-            const msgs = (m[activeId] ?? []).map((mm: any) => (mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm));
+            const msgs = (m[activeId] ?? []).map((mm: any) =>
+              mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm
+            );
             return {
               ...m,
               [activeId]: [
                 ...msgs,
-                { id: Math.random().toString(36).slice(2, 10), role: 'assistant', content, tool_result: tool, status: 'approved' } as any,
+                {
+                  id: Math.random().toString(36).slice(2, 10),
+                  role: 'assistant',
+                  content,
+                  tool_result: tool,
+                  status: 'approved',
+                } as any,
               ],
             };
           });
-          setThreads((ts) => ts.map((t) => (t.id === activeId ? { ...t, insuranceStatus: 'approved' } : t)));
+          setThreads((ts) =>
+            ts.map((t) => (t.id === activeId ? { ...t, insuranceStatus: 'approved' } : t))
+          );
           stopped = true;
         } else if (st === 'denied') {
           setMessagesById((m) => {
-            const msgs = (m[activeId] ?? []).map((mm: any) => (mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm));
+            const msgs = (m[activeId] ?? []).map((mm: any) =>
+              mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm
+            );
             return {
               ...m,
               [activeId]: [
                 ...msgs,
-                { id: Math.random().toString(36).slice(2, 10), role: 'assistant', content: 'Insurance reply denied. The response was not posted to chat.', status: 'denied' } as any,
+                {
+                  id: Math.random().toString(36).slice(2, 10),
+                  role: 'assistant',
+                  content: 'Insurance reply denied. The response was not posted to chat.',
+                  status: 'denied',
+                } as any,
               ],
             };
           });
-          setThreads((ts) => ts.map((t) => (t.id === activeId ? { ...t, insuranceStatus: 'denied' } : t)));
+          setThreads((ts) =>
+            ts.map((t) => (t.id === activeId ? { ...t, insuranceStatus: 'denied' } : t))
+          );
           stopped = true;
         }
       } catch {
@@ -222,7 +300,9 @@ export default function Page() {
 
     // initial and interval
     tick();
-    const id = setInterval(() => { if (!stopped) tick(); }, 5000);
+    const id = setInterval(() => {
+      if (!stopped) tick();
+    }, 5000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasPendingInsurance, activeId, threads]);
@@ -299,7 +379,9 @@ export default function Page() {
 
       // If insurance pending arrived, set sidebar status = pending for this thread
       if (meta && (meta as any).insurance_pending) {
-        setThreads((ts) => ts.map((t) => (t.id === sessionId ? { ...t, insuranceStatus: 'pending' } : t)));
+        setThreads((ts) =>
+          ts.map((t) => (t.id === sessionId ? { ...t, insuranceStatus: 'pending' } : t))
+        );
       }
     } catch (e: any) {
       if (e?.name !== 'AbortError') {
@@ -397,10 +479,13 @@ export default function Page() {
               {activeMessages.map((m) => (
                 <ChatMessage key={m.id} msg={m} />
               ))}
-
-              {/* Assistant typing skeleton while waiting */}
+              {activeMessages.map(
+                (m: any) =>
+                  m?.meta?.insurance_pending && (
+                    <PendingInsuranceCard key={'pend-' + m.id} meta={m.meta.insurance_pending} />
+                  )
+              )}
               {pending && <AssistantTypingSkeleton />}
-
               <div className="py-8" />
             </div>
           </div>
@@ -458,6 +543,38 @@ export default function Page() {
 }
 
 /* ------------------------------ UI bits --------------------------------- */
+
+function PendingInsuranceCard({ meta }: { meta: any }) {
+  console.log('META', meta);
+
+  const rj = meta?.tool_result?.result_json ?? {};
+  const corp = rj?.corporate_meta ?? null;
+  const decisionId = corp?.decision_id ?? '-';
+  const payer = rj?.payer ?? 'patient';
+  const workAcc = corp?.is_work_accident;
+  const hint = typeof workAcc === 'boolean' ? (workAcc ? 'yes' : 'no') : '-';
+
+  return (
+    <div className="w-full rounded-2xl border border-amber-600/30 bg-[#121212] px-4 py-3">
+      <div className="mb-1 text-sm font-semibold text-amber-400">Insurance pending…</div>
+      <div className="text-sm text-neutral-300">
+        Decision ID: <span className="text-neutral-200">{decisionId}</span>
+        <br />
+        Suggested payer (rest): <span className="text-neutral-200">{payer}</span>
+        <br />
+        Work accident (suggested): <span className="text-neutral-200">{hint}</span>
+        <br />
+      </div>
+      <div className="mt-2 text-xs text-neutral-500">
+        Waiting for corporate approval. Check the{' '}
+        <Link href="/request" className="underline">
+          Requests
+        </Link>{' '}
+        page.
+      </div>
+    </div>
+  );
+}
 
 function TopLoader({ show }: { show: boolean }) {
   if (!show) return null;

@@ -18,7 +18,27 @@ from .adjudicator import adjudicate
 # ---------- Schemas ----------
 class ProcedureIn(BaseModel):
     name: str = Field(..., description="Procedure name as received in the claim")
-    billed: float = Field(..., description="Billed amount from hospital for this procedure")
+    billed: float = Field(
+        ..., description="Billed amount from hospital for this procedure"
+    )
+
+
+class FreeText(BaseModel):
+    text: str
+
+
+class RawJSON(BaseModel):
+    raw: str
+
+
+class WorkAccidentIn(BaseModel):
+    suspected: bool = False
+    narrative: str | None = None
+    location: str | None = None
+    during_work_hours: bool | None = None
+    sick_leave_days: int | None = None
+    happened_at: str | None = None
+
 
 class ClaimIn(BaseModel):
     fullName: str
@@ -27,18 +47,15 @@ class ClaimIn(BaseModel):
     dateOfService: date
     diagnose: str
     procedures: List[ProcedureIn]
-
-class FreeText(BaseModel):
-    text: str
-
-class RawJSON(BaseModel):
-    raw: str
+    work_accident: WorkAccidentIn | None = None  # <--- nou
 
 
 def _require_api_key() -> str:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set in environment. Load it via .env or export it before running.")
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set in environment. Load it via .env or export it before running."
+        )
     return api_key
 
 
@@ -51,10 +68,13 @@ def _adjudicate_tool_fn(**kwargs) -> Dict[str, Any]:
         hospital_name=data.hospitalName,
         date_of_service=data.dateOfService,
         diagnose=data.diagnose,
-        procedures=[ProcedureClaim(name=p.name, billed=p.billed) for p in data.procedures],
+        procedures=[
+            ProcedureClaim(name=p.name, billed=p.billed) for p in data.procedures
+        ],
     )
     result = adjudicate(claim_model, write_usage=False)
     return {"result_json": result.model_dump(), "message": result.pretty_message}
+
 
 adjudicate_claim_tool = StructuredTool.from_function(
     func=_adjudicate_tool_fn,
@@ -85,6 +105,7 @@ def _extract_claim_from_text_fn(text: str) -> Dict[str, Any]:
     parsed: ClaimIn = extractor.invoke(prompt)
     return parsed.model_dump()
 
+
 extract_claim_from_text_tool = StructuredTool.from_function(
     func=_extract_claim_from_text_fn,
     name="extract_claim_from_text",
@@ -105,7 +126,7 @@ def _adjudicate_raw_json_tool_fn(raw: str) -> Dict[str, Any]:
     start = s.find("{")
     end = s.rfind("}")
     if start != -1 and end != -1 and end > start:
-        s = s[start:end+1]
+        s = s[start : end + 1]
 
     payload = json.loads(s)
 
@@ -125,11 +146,28 @@ def _adjudicate_raw_json_tool_fn(raw: str) -> Dict[str, Any]:
             raise ValueError("Procedure 'billed' must be numeric.")
         norm_procs.append(ProcedureClaim(name=p.get("name"), billed=billed))
 
-    full_name       = pick(payload, "full name", "fullName", "full_name", "patient name", "patientName")
-    patient_ssn     = pick(payload, "patient SSN", "patientSSN", "patient_ssn", "ssn")
-    hospital_name   = pick(payload, "hospital name", "hospitalName", "hospital_name", "name of hospital", "hospital")
-    date_of_service = pick(payload, "date of service", "dateOfService", "date_of_service", "service date", "dos", "date")
-    diagnose        = pick(payload, "diagnose", "diagnosis", "dx")
+    full_name = pick(
+        payload, "full name", "fullName", "full_name", "patient name", "patientName"
+    )
+    patient_ssn = pick(payload, "patient SSN", "patientSSN", "patient_ssn", "ssn")
+    hospital_name = pick(
+        payload,
+        "hospital name",
+        "hospitalName",
+        "hospital_name",
+        "name of hospital",
+        "hospital",
+    )
+    date_of_service = pick(
+        payload,
+        "date of service",
+        "dateOfService",
+        "date_of_service",
+        "service date",
+        "dos",
+        "date",
+    )
+    diagnose = pick(payload, "diagnose", "diagnosis", "dx")
 
     claim_model = Claim(
         full_name=full_name,
@@ -142,6 +180,7 @@ def _adjudicate_raw_json_tool_fn(raw: str) -> Dict[str, Any]:
 
     result = adjudicate(claim_model, write_usage=False)
     return {"result_json": result.model_dump(), "message": result.pretty_message}
+
 
 adjudicate_claim_json_tool = StructuredTool.from_function(
     func=_adjudicate_raw_json_tool_fn,
@@ -163,6 +202,7 @@ SYSTEM_PROMPT = (
     "and potential balance bill (if out-of-network). Be brief and professional."
 )
 
+
 def build_agent() -> AgentExecutor:
     llm = ChatOpenAI(
         model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
@@ -176,12 +216,14 @@ def build_agent() -> AgentExecutor:
         adjudicate_claim_json_tool,
     ]
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
-    ])
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", SYSTEM_PROMPT),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{input}"),
+            MessagesPlaceholder(variable_name="agent_scratchpad"),
+        ]
+    )
 
     agent = create_tool_calling_agent(llm, tools, prompt)
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
@@ -197,6 +239,7 @@ def build_agent() -> AgentExecutor:
 
 # ---------- Sessions ----------
 _SESSIONS: Dict[str, AgentExecutor] = {}
+
 
 def get_or_create_session(conversation_id: str | None) -> Tuple[str, AgentExecutor]:
     if not conversation_id:

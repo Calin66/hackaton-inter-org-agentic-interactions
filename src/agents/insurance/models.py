@@ -1,17 +1,32 @@
 # insurance-agent/models.py
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Dict, Optional
+from typing import (
+    List,
+    Dict,
+    Optional,
+    Any,
+    Literal,
+)  # <--- asigură-te că ai Any, Literal
 from datetime import date
 
+
 class ProcedureClaim(BaseModel):
-    # Acceptă nume de câmpuri by_name dacă e nevoie
     model_config = ConfigDict(populate_by_name=True)
     name: str
-    billed: float  # <— IMPORTANT: numeric, nu str
+    billed: float
+
+
+# --- NOU: structura pentru work accident (opțional) ---
+class WorkAccidentInfo(BaseModel):
+    suspected: bool = False
+    narrative: Optional[str] = None
+    location: Optional[str] = None
+    during_work_hours: Optional[bool] = None
+    sick_leave_days: Optional[int] = None
+    happened_at: Optional[str] = None  # ISO datetime string
+
 
 class Claim(BaseModel):
-    # Poți trimite fie aliasurile cu spații (de la Hospital Agent),
-    # fie variantele snake_case (în Swagger, de pildă)
     model_config = ConfigDict(populate_by_name=True)
 
     full_name: str = Field(alias="full name")
@@ -21,20 +36,24 @@ class Claim(BaseModel):
     diagnose: str
     procedures: List[ProcedureClaim]
 
-# Opțional/auxiliar – utile dacă le folosești în alte părți:
+    # --- NOU, opțional ---
+    work_accident: Optional[WorkAccidentInfo] = None
+
+
 class ProcedureRef(BaseModel):
-    name: str            # nume canonic, ex: "er_visit"
-    category: str        # ex: "imaging"
-    price: float         # preț de referință
-    text: Optional[str] = None  # descriere/concat pentru RAG (dacă e cazul)
+    name: str
+    category: str
+    price: float
+    text: Optional[str] = None
+
 
 class Policy(BaseModel):
-    # suport pentru policy_id sau policyId via alias
     policy_id: Optional[str] = Field(default=None, alias="policyId")
     member: Dict[str, str]
     eligibility: Dict[str, str]
     coverage: Dict[str, Dict]
     limits: Dict[str, Dict]
+
 
 class AdjudicatedItem(BaseModel):
     claim_name: str
@@ -46,6 +65,7 @@ class AdjudicatedItem(BaseModel):
     payable_amount: float
     notes: str
 
+
 class AdjudicationResult(BaseModel):
     policy_id: Optional[str]
     eligible: bool
@@ -53,3 +73,7 @@ class AdjudicationResult(BaseModel):
     items: List[AdjudicatedItem]
     total_payable: float
     pretty_message: str
+
+    # --- NOI: câmpuri pe care le setezi în /adjudicate ---
+    payer: Literal["patient", "corporation"] = "patient"
+    corporate_meta: Optional[Dict[str, Any]] = None

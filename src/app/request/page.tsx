@@ -4,13 +4,29 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { InsuranceApprovalCard } from '@/components/InsuranceApprovalCard';
 
-const API_BASE = (process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8000').replace(/\/$/, '');
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8002').replace(/\/$/, '');
 
 type Item = {
   session_id: string;
   status: 'pending' | 'approved' | 'denied' | string;
   invoice: any;
-  insurance_reply: { text: string; tool_result?: any };
+  insurance_reply: {
+    text: string;
+    tool_result?: {
+      result_json?: {
+        policy_id?: string | null;
+        eligible?: boolean;
+        total_payable?: number;
+        payer?: 'patient' | 'corporation';
+        corporate_meta?: {
+          decision_id?: string;
+          status?: string; // pending/approved/denied (on corporate side)
+          suggested?: { is_work_accident?: boolean; payer?: 'patient' | 'corporation' };
+        } | null;
+      };
+      message?: string;
+    };
+  };
 };
 
 export default function RequestsPage() {
@@ -36,7 +52,8 @@ export default function RequestsPage() {
 
   useEffect(() => {
     fetchItems('pending');
-    const id = setInterval(() => fetchItems(), 10000);
+    // refresh periodically while on page
+    const id = setInterval(() => fetchItems(), 8000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -56,9 +73,33 @@ export default function RequestsPage() {
       if (!res.ok) throw new Error(`Failed: ${res.status}`);
       await res.json();
       fetchItems(status);
-    } catch (e) {
-      // ignore for brevity
+    } catch {
+      /* ignore */
     }
+  }
+
+  function computeHeader(it: Item): string | undefined {
+    const rj = it.insurance_reply?.tool_result?.result_json ?? {};
+    const payer = rj?.payer;
+    const corp = rj?.corporate_meta ?? null;
+    const isWA = corp?.suggested?.is_work_accident;
+    const decisionId = corp?.decision_id;
+
+    const bits: string[] = [];
+    if (payer) bits.push(`Payer (rest): ${payer}`);
+    if (typeof isWA === 'boolean') bits.push(`Work accident: ${isWA ? 'yes' : 'no'}`);
+    if (decisionId) bits.push(`Decision ID: ${decisionId}`);
+
+    // If policy is invalid, override header
+    const policyValid = Boolean(rj?.eligible && rj?.policy_id);
+    if (!policyValid) return 'No valid policy found';
+    return bits.length ? bits.join(' · ') : undefined;
+  }
+
+  function canAct(it: Item): boolean {
+    if (status !== 'pending') return false;
+    const rj = it.insurance_reply?.tool_result?.result_json ?? {};
+    return Boolean(rj?.eligible && rj?.policy_id);
   }
 
   return (
@@ -77,7 +118,9 @@ export default function RequestsPage() {
               <option value="approved">Approved</option>
               <option value="denied">Denied</option>
             </select>
-            <Link className="text-sm text-neutral-300 hover:underline" href="/">Back to Claim Bridge</Link>
+            <Link className="text-sm text-neutral-300 hover:underline" href="/">
+              Back to Claim Bridge
+            </Link>
           </div>
         </div>
 
@@ -91,17 +134,17 @@ export default function RequestsPage() {
           ) : (
             <div className="space-y-4">
               {items.map((it) => {
-                const policyValid = it.insurance_reply?.policy_valid === true;
-                const canAct = status === 'pending' && policyValid;
+                const header = computeHeader(it);
+                const enabled = canAct(it);
                 return (
                   <InsuranceApprovalCard
                     key={it.session_id}
                     reply={it.insurance_reply?.text ?? ''}
                     tool={it.insurance_reply?.tool_result}
-                    onApprove={canAct ? () => act(it.session_id, 'approve') : noop}
-                    onDeny={canAct ? () => act(it.session_id, 'deny') : noop}
-                    hideActions={!canAct}
-                    header={policyValid ? undefined : 'No valid policy found'}
+                    onApprove={enabled ? () => act(it.session_id, 'approve') : undefined}
+                    onDeny={enabled ? () => act(it.session_id, 'deny') : undefined}
+                    hideActions={!enabled}
+                    header={header}
                   />
                 );
               })}
@@ -112,5 +155,3 @@ export default function RequestsPage() {
     </div>
   );
 }
-
-function noop() {}

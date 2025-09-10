@@ -1,0 +1,46 @@
+[
+  {
+    "id": "scope-commute",
+    "text": "Sunt eligibile ca accident de munca incidentele petrecute in drum direct intre domiciliu si locul de munca/client pe ruta declarata oficial. Abaterea semnificativa de la ruta (detur de placere, cumparaturi) exclude incadrarea."
+  },
+  {
+    "id": "scope-hours",
+    "text": "Accidentele trebuie sa aiba loc in timpul orelor de lucru sau in deplasari aprobate de serviciu. Evenimentele in afara programului nu se considera accident de munca, cu exceptia navetei directe."
+  },
+  {
+    "id": "transport-modes",
+    "text": "Mijloace de deplasare acceptate pentru naveta: mers pe jos, bicicleta, trotineta, transport public si autoturism pe ruta declarata. Mijloace neacceptate sau utilizate in mod periculos pot invalida incadrarea."
+  },
+  {
+    "id": "ppe",
+    "text": "Daca politica prevede echipament minim (ex. casca pentru bicicleta) iar acesta lipseste, incadrarea poate fi respinsa, cu exceptia cazurilor in care legislatia impune altfel."
+  },
+  {
+    "id": "directness",
+    "text": "Ruta trebuie sa fie directa. Opririle scurte inevitabile (ex. schimb de mijloc de transport) pot fi tolerate, dar abaterile voluntare nu."
+  },
+  {
+    "id": "remote-work",
+    "text": "Pentru munca remote, accidentele survenite in spatiul de lucru declarat si in timpul programului pot fi considerate accidente de munca."
+  },
+  {
+    "id": "reporting",
+    "text": "Incidentul trebuie raportat prompt (in maximum 24 de ore, cand este posibil). Raportarile tardive fara motiv pot duce la solicitarea de dovezi suplimentare."
+  },
+  {
+    "id": "medical-leave",
+    "text": "Zilele de concediu medical sunt recunoscute conform recomandarii medicale; numarul de zile nu influenteaza incadrarea, dar ajuta la estimarea responsabilitatilor financiare."
+  },
+  {
+    "id": "exclusions",
+    "text": "Excluderi: activitati recreative, sporturi extreme in afara obligatiilor de serviciu, consum de alcool sau substante, abateri majore de la ruta declarata, folosirea vehiculului in scop personal in timpul programului fara aprobare."
+  },
+  {
+    "id": "examples-accepted",
+    "text": "Exemplu acceptat: accident de bicicleta miercuri la 08:30 pe ruta domiciliu → client, fara abatere, inainte de inceperea programului dar ca parte a navetei directe."
+  },
+  {
+    "id": "examples-rejected",
+    "text": "Exemplu respins: accident petrecut in drum spre sala de sport dupa munca; nu este naveta directa si nu are legatura cu sarcinile de serviciu."
+  }
+]

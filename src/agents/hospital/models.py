@@ -1,9 +1,39 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 
+
 class ProcedureLine(BaseModel):
     name: str
     billed: float
+
+
+class MessageRequest(BaseModel):
+    session_id: Optional[str] = None
+    message: str
+
+
+class PendingResponse(BaseModel):
+    session_id: str
+    status: str = "pending"
+    agent_reply: str
+    invoice: Dict[str, Any]
+
+
+class ApprovedResponse(BaseModel):
+    session_id: str
+    status: str = "approved"
+    final_json: Dict[str, Any]
+    file_path: Optional[str] = None  # <-- NEW: path to saved claim file
+
+
+class WorkAccident(BaseModel):
+    suspected: bool = False
+    narrative: str | None = None
+    location: str | None = None
+    during_work_hours: bool | None = None
+    sick_leave_days: int | None = None
+    happened_at: str | None = None
+
 
 class Invoice(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -13,19 +43,4 @@ class Invoice(BaseModel):
     date_of_service: str = Field(alias="date of service")
     diagnose: str
     procedures: List[ProcedureLine] = []
-
-class MessageRequest(BaseModel):
-    session_id: Optional[str] = None
-    message: str
-
-class PendingResponse(BaseModel):
-    session_id: str
-    status: str = "pending"
-    agent_reply: str
-    invoice: Dict[str, Any]
-
-class ApprovedResponse(BaseModel):
-    session_id: str
-    status: str = "approved"
-    final_json: Dict[str, Any]
-    file_path: Optional[str] = None  # <-- NEW: path to saved claim file
+    work_accident: WorkAccident | None = None  # <--- NOU
