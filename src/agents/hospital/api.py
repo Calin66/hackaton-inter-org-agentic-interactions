@@ -204,14 +204,15 @@ def _apply_discount_name(invoice: Dict[str, Any], percent: float, name: str) -> 
 # ---------------------------------------------------------------------
 
 
-def missing_required(invoice: Dict[str, Any]) -> List[str]:
-    missing = []
+def missing_required(invoice: Dict[str, Any] | None) -> List[str]:
+    inv = invoice or {}
+    missing: List[str] = []
     for key in REQUIRED_FIELDS:
         if key == "procedures":
-            if not invoice.get("procedures"):
+            if not inv.get("procedures"):
                 missing.append("procedures")
         else:
-            if not str(invoice.get(key, "")).strip():
+            if not str(inv.get(key, "")).strip():
                 missing.append(key)
     return missing
 
@@ -558,7 +559,7 @@ def doctor_message(req: MessageRequest):
     # First turn (or after approval/cleared session)
     if session["status"] in ("empty") or not session.get("invoice"):
         extracted = extract_fields(req.message)
-        invoice = build_initial_invoice(extracted, TARIFF)
+        invoice = build_initial_invoice(extracted, TARIFF) or {}
 
         # normalize and compute totals (includes tariff, discount, tax)
         _ensure_proc_fields(invoice)
@@ -583,7 +584,7 @@ def doctor_message(req: MessageRequest):
         miss = missing_required(invoice)
 
         # If a work accident was already inferred at extraction time, collect any missing WA details first
-        if invoice.get("work_accident", {}).get("suspected"):
+        if (invoice or {}).get("work_accident", {}).get("suspected"):
             missW = _missing_work_acc(invoice)
             if missW:
                 reply = (
@@ -664,7 +665,7 @@ def doctor_message(req: MessageRequest):
 
     if atype == "approve":
         miss = missing_required(invoice)
-        if invoice.get("work_accident", {}).get("suspected"):
+        if (invoice or {}).get("work_accident", {}).get("suspected"):
             missW = _missing_work_acc(invoice)
             if missW:
                 reply = (
@@ -752,7 +753,7 @@ def doctor_message(req: MessageRequest):
         # Gate: must be approved first; also surface missing requirements if any
         miss = missing_required(invoice)
 
-        if invoice.get("work_accident", {}).get("suspected"):
+        if (invoice or {}).get("work_accident", {}).get("suspected"):
             missW = _missing_work_acc(invoice)
             if missW:
                 reply = (
@@ -907,7 +908,7 @@ def doctor_message(req: MessageRequest):
     miss = missing_required(invoice)
 
     # Gate missing work-accident details if flagged
-    if invoice.get("work_accident", {}).get("suspected"):
+    if (invoice or {}).get("work_accident", {}).get("suspected"):
         missW = _missing_work_acc(invoice)
         if missW:
             reply = (
