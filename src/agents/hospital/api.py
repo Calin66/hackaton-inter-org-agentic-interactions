@@ -224,7 +224,7 @@ def doctor_message(req: MessageRequest):
     # ------------------------------------------------------------------
 
     # First turn (or after approval/cleared session)
-    if session["status"] in ("empty", "approved") or not session.get("invoice"):
+    if session["status"] in ("empty") or not session.get("invoice"):
         extracted = extract_fields(req.message)
         invoice = build_initial_invoice(extracted, TARIFF)
 
