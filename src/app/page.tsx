@@ -140,7 +140,9 @@ export default function Page() {
     [activeMessages]
   );
 
-  const [pending, setPending] = useState(false);
+  // Track which thread (if any) has a pending request
+  const [pendingFor, setPendingFor] = useState<string | null>(null);
+  const pending = pendingFor === activeId;
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -266,7 +268,7 @@ export default function Page() {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    setPending(true);
+    setPendingFor(sessionId);
     try {
       const res = await fetch(`${API_BASE}/doctor_message`, {
         method: 'POST',
@@ -326,7 +328,8 @@ export default function Page() {
         }));
       }
     } finally {
-      setPending(false);
+      // Only clear if this request is the one currently marked as pending
+      setPendingFor((prev) => (prev === sessionId ? null : prev));
       abortRef.current = null;
     }
   }
