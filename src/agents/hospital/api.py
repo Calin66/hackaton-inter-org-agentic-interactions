@@ -110,8 +110,20 @@ def _claims_dir() -> Path:
     return d
 
 def _canonicalize_invoice(inv: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the invoice exactly in the required JSON structure,
-    coercing billed to int when possible (else 2-decimal float)."""
+    """Return the invoice in the required JSON structure for persistence/insurance,
+    preserving tariff/discount/totals when available. Coerce currency fields to
+    int when whole, else 2-decimal float.
+
+    This keeps the frontend able to display detailed rows after approval while
+    remaining backward-compatible with the insurance payload (which only uses
+    name + billed).
+    """
+    # Ensure numbers are consistent before snapshotting
+    try:
+        _recompute_totals(inv)
+    except Exception:
+        pass
+
     out: Dict[str, Any] = {
         "patient name": inv.get("patient name", ""),
         "patient SSN": inv.get("patient SSN", ""),
@@ -120,10 +132,36 @@ def _canonicalize_invoice(inv: Dict[str, Any]) -> Dict[str, Any]:
         "diagnose": inv.get("diagnose", ""),
         "procedures": [],
     }
+
+    # Carry totals if present
+    for k in ("subtotal", "discounts_total", "tax_rate", "tax", "total"):
+        if k in inv:
+            v = float(inv.get(k, 0))
+            # Keep tax_rate as-is (fraction), others as currency
+            if k != "tax_rate":
+                v = int(v) if float(v).is_integer() else round(v, 2)
+            out[k] = v
+
+    def _money(x: Any) -> Any:
+        try:
+            xf = float(x)
+            return int(xf) if float(xf).is_integer() else round(xf, 2)
+        except Exception:
+            return 0
+
     for p in inv.get("procedures", []):
-        billed = float(p.get("billed", 0))
-        billed = int(billed) if float(billed).is_integer() else round(billed, 2)
-        out["procedures"].append({"name": p.get("name", ""), "billed": billed})
+        tariff = _money(p.get("tariff", 0))
+        discount = _money(p.get("discount", 0))
+        billed = _money(p.get("billed", 0))
+        out["procedures"].append(
+            {
+                "name": p.get("name", ""),
+                # Preserve full details to keep UI consistent post-approval
+                "tariff": tariff,
+                "discount": discount,
+                "billed": billed,
+            }
+        )
     return out
 
 def _save_claim(final_json: Dict[str, Any]) -> str:
@@ -155,13 +193,21 @@ def generate_claim_title(inv: Dict[str, Any]) -> str:
 def _to_insurance_claim(inv: Dict[str, Any]) -> Dict[str, Any]:
     """Map internal invoice to the insurance agent's expected JSON fields."""
     canon = _canonicalize_invoice(inv)
+    # Ensure only the expected keys are passed for procedures
+    procs = []
+    for p in canon.get("procedures", []):
+        try:
+            billed = float(p.get("billed", 0))
+        except Exception:
+            billed = 0.0
+        procs.append({"name": p.get("name", ""), "billed": billed})
     return {
         "fullName": canon.get("patient name", ""),
         "patientSSN": canon.get("patient SSN", ""),
         "hospitalName": canon.get("hospital name", ""),
         "dateOfService": canon.get("date of service", ""),
         "diagnose": canon.get("diagnose", ""),
-        "procedures": canon.get("procedures", []),
+        "procedures": procs,
     }
 
 def _send_claim_to_insurance(inv: Dict[str, Any], conversation_id: Optional[str] = None) -> Dict[str, Any]:

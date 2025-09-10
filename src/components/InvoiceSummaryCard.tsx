@@ -416,7 +416,9 @@ function normalizeHospitalBackendInvoice(inv: any) {
   const diagnosis = inv?.diagnose ? [String(inv.diagnose).trim()].filter(Boolean) : [];
 
   const procedures = (inv?.procedures ?? []).map((p: any) => {
-    const tariff = Number(p?.tariff ?? p?.price ?? 0) || 0;
+    // Fallbacks: after approval we may only have `billed` without `tariff`
+    const billedRaw = Number(p?.billed ?? 0) || 0;
+    const tariff = Number(p?.tariff ?? p?.price ?? billedRaw) || 0;
     const discount = Number(p?.discount ?? 0) || 0;
     const billed = Number(p?.billed ?? tariff - discount) || 0;
     return {
@@ -428,8 +430,12 @@ function normalizeHospitalBackendInvoice(inv: any) {
     };
   });
 
-  const subtotalFromItems = procedures.reduce(
+  const subtotalFromPrice = procedures.reduce(
     (s: number, p: any) => s + (Number(p.price) || 0),
+    0
+  );
+  const subtotalFromBilled = procedures.reduce(
+    (s: number, p: any) => s + (Number(p.total) || 0),
     0
   );
   const discountsFromItems = procedures.reduce(
@@ -437,9 +443,16 @@ function normalizeHospitalBackendInvoice(inv: any) {
     0
   );
   const has = (n: any) => Number.isFinite(Number(n));
-  const subtotal = has(inv?.subtotal) ? Number(inv.subtotal) : subtotalFromItems;
+  // Prefer backend-provided subtotal, else sum of tariffs (price) if available,
+  // else fall back to sum of billed (net) when tariff is missing (approved JSON).
+  const subtotal = has(inv?.subtotal)
+    ? Number(inv.subtotal)
+    : (subtotalFromPrice > 0 ? subtotalFromPrice : subtotalFromBilled);
   const discounts = has(inv?.discounts_total) ? Number(inv.discounts_total) : discountsFromItems;
-  const baseAfterDiscounts = Math.max(0, subtotal - discounts);
+  // If tariff exists, base = subtotal - discounts; otherwise billed already reflects discounts.
+  const baseAfterDiscounts = subtotalFromPrice > 0
+    ? Math.max(0, subtotal - discounts)
+    : subtotalFromBilled;
   const tax = has(inv?.tax)
     ? Number(inv.tax)
     : has(inv?.tax_rate)
