@@ -30,6 +30,7 @@ def get_client() -> OpenAI:
 def get_model() -> str:
     return os.environ.get("MODEL", "gpt-4o-mini")
 
+
 # ------------------ Field extraction ------------------
 EXTRACTION_SYSTEM = """
 You are an expert hospital coding assistant. Extract key fields for billing from doctor's free text.
@@ -82,6 +83,7 @@ def extract_fields(free_text: str) -> Dict[str, Any]:
 
     return data
 
+
 # ------------------ Talkative prompt for missing data ------------------
 MISSING_PROMPT_SYSTEM = """
 You are a friendly, concise hospital billing assistant. The doctor is creating an invoice.
@@ -108,8 +110,8 @@ def generate_missing_prompt(invoice: Dict[str, Any], missing_keys: List[str]) ->
     )
     return resp.choices[0].message.content.strip()
 
+
 # ------------------ Natural language intent parsing ------------------
-# --- replace the existing INTENT_SYSTEM in llm.py ---
 INTENT_SYSTEM = """
 You convert a doctor's free-text message into a structured ACTION for a hospital billing assistant.
 
@@ -120,16 +122,29 @@ You MUST return STRICT JSON with keys:
   - for add_procedure: { "procedure_free_text": string }
   - for remove_procedure_by_index: { "index": integer >=1 }  # 1-based
   - for remove_procedure_by_name: { "name": string }
-  - for discount_percent: { "percent": number }
+  - for discount_percent: { "percent": number, "index": integer (optional, 1-based), "name": string (optional) }
+    # If "index" is present, apply to that procedure position; if "name" is present, apply to that procedure by exact name.
+    # If neither is present, apply to ALL procedures.
   - for set_price: { "name": string, "amount": number }
-  - for provide_fields: { 
-        "patient name": string (optional), 
-        "patient SSN": string (optional), 
-        "diagnose": string (optional), 
+  - for provide_fields: {
+        "patient name": string (optional),
+        "patient SSN": string (optional),
+        "date of service": string (optional, any natural date; the server will normalize),
+        "diagnose": string (optional),
         "procedures": array of strings (optional)
     }
   - for smalltalk: { "reply": string }  # brief greeting/ack within billing context
   - for unknown: { "reason": string }
+
+IMPORTANT – USING current_procedures:
+- You will also be given a list called current_procedures (exact line names on the invoice).
+- When the message targets a specific procedure by NAME, set params.name to the EXACT string from current_procedures:
+  * match case-insensitively, ignoring minor punctuation/hyphens/spaces;
+  * pick the closest match if there’s minor variation;
+  * do NOT invent new names.
+- When the message targets a specific procedure by POSITION (e.g., "the second"), set params.index accordingly (1-based).
+- If the message says "to <procedure>" or otherwise targets a single line, you MUST include either params.name or params.index.
+  Only omit both for broad commands like "apply a 10% discount" that clearly apply to all procedures.
 
 SCOPE POLICY:
 - The assistant is ONLY for hospital billing tasks: drafting/adjusting/approving invoices, patient identifiers, diagnosis strings, procedures, prices/discounts.
@@ -138,9 +153,11 @@ SCOPE POLICY:
 
 RULES:
 - Approval/discount/price/procedure edits map to their respective types.
-- If the message provides patient fields or procedures, use provide_fields.
+- If the message provides patient fields (including date) or procedures, use provide_fields.
 - Position-based removal → remove_procedure_by_index.
 - Name-based removal → remove_procedure_by_name.
+- If the doctor asks to “send/submit/forward to insurance” (or similar), return type="send_to_insurance".
+  Never infer approval from such requests; only return type="approve" when the doctor explicitly confirms.
 - If none of the above AND in scope, use unknown with a brief reason; if clearly out of scope, use reason="out_of_scope".
 
 Return ONLY the JSON object. No commentary.
@@ -149,25 +166,37 @@ Return ONLY the JSON object. No commentary.
 def interpret_doctor_message(message: str, current_lines: List[str]) -> Dict[str, Any]:
     client = get_client()
     model = get_model()
-    # Expanded examples to strongly bias detection of greetings/smalltalk
+    # Expanded examples to bias name/index discounts and date changes
     context = {
         "current_procedures": current_lines,
         "examples": [
             {"msg": "hello", "expect": {"type":"smalltalk","params":{"reply":"Hello! I’m your hospital billing assistant. What can I help you with today?"}}},
-            {"msg": "hi there!", "expect": {"type":"smalltalk","params":{"reply":"Hi! How can I help—create a new invoice, add procedures, or finalize one?"}}},
-            {"msg": "how are you?", "expect": {"type":"smalltalk","params":{"reply":"I’m doing well and ready to help with billing. What would you like to do next?"}}},
             {"msg": "thanks", "expect": {"type":"smalltalk","params":{"reply":"You’re welcome! Anything else I can help with?"}}},
+
             {"msg": "remove the second procedure", "expect": {"type":"remove_procedure_by_index","params":{"index":2}}},
-            {"msg": "i confirm, the data is correct", "expect": {"type":"approve","params":{}}},
-            {"msg": "apply a 10% discount", "expect": {"type":"discount_percent","params":{"percent":10}}},
             {"msg": "delete x-ray forearm", "expect": {"type":"remove_procedure_by_name","params":{"name":"X-ray forearm"}}},
+
+            {"msg": "i confirm, the data is correct", "expect": {"type":"approve","params":{}}},
+
+            # Discounts
+            {"msg": "apply a 10% discount", "expect": {"type":"discount_percent","params":{"percent":10}}},
+            {"msg": "apply 10% discount to the second procedure", "expect": {"type":"discount_percent","params":{"percent":10,"index":2}}},
+            {"msg": "apply a 10 percent discount to ER visit high complexity", "expect": {"type":"discount_percent","params":{"percent":10,"name":"ER visit high complexity"}}},
+            {"msg": "add a 5% discount to X-ray forearm", "expect": {"type":"discount_percent","params":{"percent":5,"name":"X-ray forearm"}}},
+
+            # Price change
             {"msg": "set ER visit high complexity to 1150", "expect": {"type":"set_price","params":{"name":"ER visit high complexity","amount":1150}}},
+
+            # Sending to insurance (no implicit approval)
             {"msg": "send to insurance", "expect": {"type":"send_to_insurance","params":{}}},
-            {"msg": "check coverage with insurance", "expect": {"type":"send_to_insurance","params":{}}},
-            {"msg": "ask insurer for adjudication", "expect": {"type":"send_to_insurance","params":{}}},
-            {"msg": "what's the weather in Bucharest?", "expect": {"type":"unknown","params":{"reason":"out_of_scope"}}},
-            {"msg": "tell me a joke", "expect": {"type":"unknown","params":{"reason":"out_of_scope"}}},
-            {"msg": "how to treat pneumonia?", "expect": {"type":"unknown","params":{"reason":"out_of_scope"}}}
+            {"msg": "send the insurance", "expect": {"type":"send_to_insurance","params":{}}},
+
+            # Date changes (server will normalize)
+            {"msg": "change the invoice date to 2025-10-01", "expect": {"type":"provide_fields","params":{"date of service":"2025-10-01"}}},
+            {"msg": "set date to Oct 1, 2025", "expect": {"type":"provide_fields","params":{"date of service":"Oct 1, 2025"}}},
+
+            # Out of scope
+            {"msg": "tell me a joke", "expect": {"type":"unknown","params":{"reason":"out_of_scope"}}}
         ]
     }
     resp = client.chat.completions.create(
@@ -190,6 +219,7 @@ def interpret_doctor_message(message: str, current_lines: List[str]) -> Dict[str
     if "params" not in data or not isinstance(data["params"], dict):
         data["params"] = {}
     return data
+
 
 # ------------------ LLM mapping for procedures ------------------
 PROC_MAP_SYSTEM = """
