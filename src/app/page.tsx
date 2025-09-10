@@ -145,6 +145,8 @@ export default function Page() {
   const [searchQuery, setSearchQuery] = useState('');
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   // In-chat insurance approval is disabled; approvals happen on /request
+  // NOTE: We now add lightweight in-chat step buttons to trigger
+  // 'approve' and 'send to insurance' prompts for better UX.
 
   // auto-scroll when new messages
   useEffect(() => {
@@ -208,7 +210,7 @@ export default function Page() {
               ...m,
               [activeId]: [
                 ...msgs,
-                { id: Math.random().toString(36).slice(2, 10), role: 'assistant', content: 'Insurance reply denied. The response was not posted to chat.', status: 'denied' } as any,
+                { id: Math.random().toString(36).slice(2, 10), role: 'assistant', content: 'Insurance denied.', status: 'denied' } as any,
               ],
             };
           });
@@ -335,6 +337,59 @@ export default function Page() {
     return threads.filter((t) => t.title.toLowerCase().includes(q));
   }, [searchQuery, threads]);
 
+  // --------- Action helpers: determine when to show step buttons ---------
+  function isInsuranceToolResult(obj: any): boolean {
+    if (!obj || typeof obj !== 'object') return false;
+    return 'result_json' in obj || 'message' in obj; // shape used by insurance agent
+  }
+  function isInvoiceShape(obj: any): boolean {
+    if (!obj || typeof obj !== 'object') return false;
+    if (isInsuranceToolResult(obj)) return false;
+    // heuristic: hospital invoice from backend
+    return (
+      Array.isArray(obj?.procedures) &&
+      ('patient name' in obj || 'patient SSN' in obj || 'diagnose' in obj)
+    );
+  }
+  function invoiceReady(inv: any): boolean {
+    if (!isInvoiceShape(inv)) return false;
+    const hasPN = typeof inv?.['patient name'] === 'string' && inv['patient name'].trim().length > 0;
+    const hasSSN = typeof inv?.['patient SSN'] === 'string' && inv['patient SSN'].trim().length > 0;
+    const hasDx = typeof inv?.diagnose === 'string' && inv.diagnose.trim().length > 0;
+    const hasProcedures = Array.isArray(inv?.procedures) && inv.procedures.length > 0;
+    return hasPN && hasSSN && hasDx && hasProcedures;
+  }
+  const lastAssistantWithTool = useMemo(() => {
+    const arr = [...(activeMessages ?? [])].reverse();
+    return arr.find((m) => m.role === 'assistant' && (m as any)?.tool_result);
+  }, [activeMessages]);
+  // Whether we already have an approved message in this thread
+  const hasApprovedMessage = useMemo(
+    () => !![...(activeMessages ?? [])].reverse().find((m) => (m as any)?.status === 'approved'),
+    [activeMessages]
+  );
+  const threadInsuranceStatus = useMemo(
+    () => (threads.find((t) => t.id === activeId) as any)?.insuranceStatus ?? null,
+    [threads, activeId]
+  );
+  // Show Approve when invoice is complete, nothing sent to insurance yet, and not already approved
+  const canApproveInvoice = useMemo(() => {
+    if (!lastAssistantWithTool) return false;
+    const tool = (lastAssistantWithTool as any).tool_result;
+    if (!invoiceReady(tool)) return false;
+    if (hasApprovedMessage) return false;
+    if (hasPendingInsurance) return false;
+    if (threadInsuranceStatus === 'approved' || threadInsuranceStatus === 'pending' || threadInsuranceStatus === 'denied') return false;
+    return true;
+  }, [lastAssistantWithTool, hasApprovedMessage, hasPendingInsurance, threadInsuranceStatus]);
+  const canSendToInsurance = useMemo(() => {
+    // Show send-to-insurance only after hospital approval exists
+    if (!hasApprovedMessage) return false;
+    if (hasPendingInsurance) return false; // already sent and awaiting approval
+    if (threadInsuranceStatus === 'approved' || threadInsuranceStatus === 'pending' || threadInsuranceStatus === 'denied') return false;
+    return true;
+  }, [hasApprovedMessage, hasPendingInsurance, threadInsuranceStatus]);
+
   /* -------------------------------- Render ------------------------------- */
   return (
     <div className="h-dvh w-dvw bg-[#0f0f0f] text-neutral-200 antialiased">
@@ -409,12 +464,65 @@ export default function Page() {
               {/* Assistant typing skeleton while waiting */}
               {pending && <AssistantTypingSkeleton />}
 
+              {/* Step action bar: Approve -> Send to insurance */}
+              {(canApproveInvoice || canSendToInsurance) && !pending && (
+                <div className="sticky bottom-0 z-10 mt-2 rounded-2xl border border-neutral-800 bg-[#121212] p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm text-neutral-300">
+                      {canApproveInvoice
+                        ? 'Invoice is complete. Approve to finalize.'
+                        : 'Invoice approved. Send to insurance for verification.'}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {canApproveInvoice && (
+                        <button
+                          disabled={pending}
+                          onClick={() => {
+                            const text = 'approve';
+                            setMessagesById((m) => ({
+                              ...m,
+                              [activeId]: [
+                                ...(m[activeId] ?? []),
+                                { id: newId(), role: 'user', content: text },
+                              ],
+                            }));
+                            sendToBackend(text, activeId);
+                          }}
+                          className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+                        >
+                          Approve
+                        </button>
+                      )}
+                      {canSendToInsurance && (
+                        <button
+                          disabled={pending}
+                          onClick={() => {
+                            const text = 'send to insurance';
+                            setMessagesById((m) => ({
+                              ...m,
+                              [activeId]: [
+                                ...(m[activeId] ?? []),
+                                { id: newId(), role: 'user', content: text },
+                              ],
+                            }));
+                            sendToBackend(text, activeId);
+                          }}
+                          className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+                        >
+                          Send to insurance
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="py-8" />
             </div>
           </div>
 
           <ClaudeComposer
-            disabledd={pending} // already in your code; keeps input disabled
+            disabledd={pending || threadInsuranceStatus === 'denied'} // disable after denial
             onSend={(text) => {
               const trimmed = (text ?? '').trim();
               if (!trimmed) return;

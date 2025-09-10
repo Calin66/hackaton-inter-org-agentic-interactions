@@ -61,7 +61,11 @@ function normalizeNewInvoice(inv: any) {
 export function InvoiceSummaryCard({ data }: { data: any }) {
   // Determine source and normalize if it’s the new backend shape
   const src = data?.draft ?? data?.invoice ?? data;
-  const normalized = isNewBackendInvoice(src) ? normalizeNewInvoice(src) : data;
+  const normalized = isHospitalBackendInvoice(src)
+    ? normalizeHospitalBackendInvoice(src)
+    : isNewBackendInvoice(src)
+    ? normalizeNewInvoice(src)
+    : data;
 
   const draft = normalized?.draft ?? normalized ?? {};
   const ready = normalized?.ready_for_insurance ?? draft?.ready_for_insurance ?? false;
@@ -388,4 +392,79 @@ function Td({
 
 function Money({ value }: { value: number }) {
   return <span className="tabular-nums">{fmtUSD(value ?? 0)}</span>;
+}
+
+/* ---------------- Normalize hospital backend invoice shape ---------------- */
+
+function isHospitalBackendInvoice(obj: any) {
+  if (!obj || typeof obj !== 'object') return false;
+  const hasPatientKeys = 'patient name' in obj || 'patient SSN' in obj || 'diagnose' in obj;
+  const procs = Array.isArray((obj as any).procedures) ? (obj as any).procedures : [];
+  const procHasFields = procs.some(
+    (p: any) => p && (('tariff' in p) || ('billed' in p) || ('discount' in p))
+  );
+  const hasTotals = 'subtotal' in obj || 'discounts_total' in obj || 'tax' in obj || 'total' in obj;
+  return hasPatientKeys && (procHasFields || hasTotals);
+}
+
+function normalizeHospitalBackendInvoice(inv: any) {
+  const full_name = (inv?.['patient name'] ?? '').trim() || undefined;
+  const ssn = (inv?.['patient SSN'] ?? '').trim() || undefined;
+  const hospital = (inv?.['hospital name'] ?? '').trim() || undefined;
+  const date_of_service = (inv?.['date of service'] ?? '').trim() || undefined;
+
+  const diagnosis = inv?.diagnose ? [String(inv.diagnose).trim()].filter(Boolean) : [];
+
+  const procedures = (inv?.procedures ?? []).map((p: any) => {
+    const tariff = Number(p?.tariff ?? p?.price ?? 0) || 0;
+    const discount = Number(p?.discount ?? 0) || 0;
+    const billed = Number(p?.billed ?? tariff - discount) || 0;
+    return {
+      name: p?.name ?? p?.procedure ?? '�?"',
+      units: 1,
+      price: tariff,
+      discount,
+      total: billed,
+    };
+  });
+
+  const subtotalFromItems = procedures.reduce(
+    (s: number, p: any) => s + (Number(p.price) || 0),
+    0
+  );
+  const discountsFromItems = procedures.reduce(
+    (s: number, p: any) => s + (Number(p.discount) || 0),
+    0
+  );
+  const has = (n: any) => Number.isFinite(Number(n));
+  const subtotal = has(inv?.subtotal) ? Number(inv.subtotal) : subtotalFromItems;
+  const discounts = has(inv?.discounts_total) ? Number(inv.discounts_total) : discountsFromItems;
+  const baseAfterDiscounts = Math.max(0, subtotal - discounts);
+  const tax = has(inv?.tax)
+    ? Number(inv.tax)
+    : has(inv?.tax_rate)
+    ? baseAfterDiscounts * Number(inv.tax_rate)
+    : 0;
+  const total = has(inv?.total) ? Number(inv.total) : baseAfterDiscounts + tax;
+
+  const missing: string[] = [];
+  if (!full_name) missing.push('patient.full_name');
+  if (!ssn) missing.push('patient.ssn');
+  if (!hospital) missing.push('hospital');
+  if (!date_of_service) missing.push('date_of_service');
+  if (!diagnosis.length) missing.push('diagnosis');
+  if (!procedures.length) missing.push('procedures');
+
+  return {
+    draft: {
+      patient: { full_name, ssn },
+      hospital,
+      date_of_service,
+      diagnosis,
+      procedures,
+      totals: { subtotal, discount: discounts, tax, total },
+      ready_for_insurance: missing.length === 0,
+    },
+    missing,
+  };
 }
