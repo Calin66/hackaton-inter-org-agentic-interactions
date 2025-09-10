@@ -135,36 +135,21 @@ def _save_claim(final_json: Dict[str, Any]) -> str:
     return str(path)
     
 def generate_claim_title(inv: Dict[str, Any]) -> str:
+    procedures = inv.get("procedures", [])
+    main_proc = procedures[0]["name"] if procedures and isinstance(procedures[0], dict) else ""
+    
+    # Scurtează procedura la primele 2 cuvinte (ex: "ER visit high complexity" -> "ER visit")
+    short_proc = " ".join(main_proc.split()[:2]) if main_proc else "Procedure"
+
+    # Extrage doar numele de familie
     name = (inv.get("patient name")
             or inv.get("full name")
             or inv.get("patient SSN")
             or "Patient")
-    name = str(name).strip()
+    last_name = str(name).strip().split()[-1]
 
-    procedures = inv.get("procedures", [])
-    main_proc = procedures[0]["name"] if procedures and isinstance(procedures[0], dict) else ""
+    return f"{short_proc} – {last_name}"
 
-    try:
-        total = sum(float(p.get("billed", 0)) for p in procedures)
-    except Exception:
-        total = 0.0
-
-    raw_date = inv.get("date of service") or inv.get("dateOfService")
-    try:
-        dt = datetime.fromisoformat(str(raw_date).replace("Z", ""))
-        formatted_date = dt.date().isoformat()
-    except Exception:
-        formatted_date = ""
-
-    parts = [name]
-    if main_proc:
-        parts.append(f"— {main_proc}")
-    if total:
-        parts.append(f"· ${total:,.2f}")
-    if formatted_date:
-        parts.append(f"on {formatted_date}")
-
-    return " ".join(parts)[:120]
 # --------------------------------------------------------
 
 def _to_insurance_claim(inv: Dict[str, Any]) -> Dict[str, Any]:
