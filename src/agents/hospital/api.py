@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any, List, Optional
 from pathlib import Path
@@ -21,6 +21,7 @@ from .billing import (
 )
 from .state import store
 from .config import init_env, INSURANCE_AGENT_URL
+from .chat_db import init_db as init_chat_db, create_chat, list_chats, get_chat, update_chat, delete_chat, add_message, list_messages
 
 app = FastAPI(title="Hospital Billing Agent (NLU, talkative)")
 
@@ -172,24 +173,26 @@ def _save_claim(final_json: Dict[str, Any]) -> str:
     path.write_text(json.dumps(final_json, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path)
     
-def generate_claim_title(inv: Dict[str, Any]) -> str:
+def compute_claim_title(inv: Dict[str, Any]) -> str:
     procedures = inv.get("procedures", [])
-    main_proc = procedures[0]["name"] if procedures and isinstance(procedures[0], dict) else ""
+    main_proc = ""
+    try:
+        if procedures and isinstance(procedures[0], dict):
+            main_proc = str(procedures[0].get("name") or "")
+    except Exception:
+        main_proc = ""
+
+    short_proc = " ".join(main_proc.split()[:2]) if (main_proc or "").strip() else "Claim"
+    name = (
+        inv.get("patient name")
+        or inv.get("full name")
+        or inv.get("patient SSN")
+        or "Patient"
+    )
+    name_s = str(name).strip()
+    last_name = name_s.split()[-1] if name_s else "Patient"
+    return f"{short_proc} - {last_name}"
     
-    # Scurtează procedura la primele 2 cuvinte (ex: "ER visit high complexity" -> "ER visit")
-    short_proc = " ".join(main_proc.split()[:2]) if main_proc else "Procedure"
-
-    # Extrage doar numele de familie
-    name = (inv.get("patient name")
-            or inv.get("full name")
-            or inv.get("patient SSN")
-            or "Patient")
-    last_name = str(name).strip().split()[-1]
-
-    return f"{short_proc} – {last_name}"
-
-# --------------------------------------------------------
-
 def _to_insurance_claim(inv: Dict[str, Any]) -> Dict[str, Any]:
     """Map internal invoice to the insurance agent's expected JSON fields."""
     canon = _canonicalize_invoice(inv)
@@ -228,6 +231,12 @@ def _startup():
     init_env()
     global TARIFF
     TARIFF = load_tariff()
+    # Initialize local chat DB (SQLite)
+    try:
+        init_chat_db()
+    except Exception as e:
+        # Do not crash server on DB init errors
+        print(f"[chat_db] init failed: {e}")
 
 @app.get("/hello")
 def hello():
@@ -238,6 +247,100 @@ def hello():
             "apply a discount, or finalize and approve one?"
         )
     }
+
+# ------------------------- Chat storage endpoints -------------------------
+
+@app.get("/chats")
+def http_list_chats():
+    try:
+        return {"items": list_chats()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chats")
+def http_create_chat(payload: Dict[str, Any] = Body(default={})):  # { id?, title? }
+    try:
+        cid = (payload or {}).get("id") or str(uuid4())[:8]
+        title = (payload or {}).get("title") or "Claim"
+        st = (payload or {}).get("insuranceStatus") or (payload or {}).get("insurance_status")
+        row = create_chat(cid, title, st)
+        return row
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/chats/{chat_id}")
+def http_update_chat(chat_id: str, payload: Dict[str, Any] = Body(default={})):  # { title?, insuranceStatus? }
+    try:
+        title = (payload or {}).get("title")
+        st = (payload or {}).get("insuranceStatus") or (payload or {}).get("insurance_status")
+        row = update_chat(chat_id, title=title, insurance_status=st)
+        if not row:
+            raise HTTPException(status_code=404, detail="chat not found")
+        return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/chats/{chat_id}")
+def http_delete_chat(chat_id: str):
+    try:
+        if not get_chat(chat_id):
+            raise HTTPException(status_code=404, detail="chat not found")
+        delete_chat(chat_id)
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chats/{chat_id}/messages")
+def http_list_messages(chat_id: str):
+    try:
+        if not get_chat(chat_id):
+            raise HTTPException(status_code=404, detail="chat not found")
+        items = list_messages(chat_id)
+        # Normalize keys for frontend expectations
+        for it in items:
+            # pass-through
+            pass
+        return {"items": items}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chats/{chat_id}/messages")
+def http_add_message(chat_id: str, payload: Dict[str, Any] = Body(default={})):  # { id, role, content, tool_result?, status? }
+    try:
+        if not get_chat(chat_id):
+            # auto-create chat with fallback title
+            create_chat(chat_id, (payload or {}).get("title") or "Claim")
+        mid = (payload or {}).get("id") or uuid4().hex[:10]
+        role = (payload or {}).get("role")
+        content = (payload or {}).get("content") or ""
+        tool_result = (payload or {}).get("tool_result")
+        status = (payload or {}).get("status")
+        if role not in ("user", "assistant"):
+            raise HTTPException(status_code=400, detail="role must be 'user' or 'assistant'")
+        row = add_message(
+            id=mid,
+            chat_id=chat_id,
+            role=role,
+            content=content,
+            tool_result=tool_result,
+            status=status,
+        )
+        return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/doctor_message")
 def doctor_message(req: MessageRequest):
@@ -288,6 +391,11 @@ def doctor_message(req: MessageRequest):
         # normalize and compute totals (includes tariff, discount, tax)
         _ensure_proc_fields(invoice)
         _recompute_totals(invoice)
+        # Suggest a title immediately for the UI
+        try:
+            invoice["title"] = compute_claim_title(invoice)
+        except Exception:
+            pass
 
         session.update({"status": "pending", "invoice": invoice})
         store.upsert(sid, session)
@@ -341,7 +449,10 @@ def doctor_message(req: MessageRequest):
         final_json = _canonicalize_invoice(invoice)
 
         # ✅ 2) Adaugă titlul uman
-        final_json["title"] = generate_claim_title(final_json)
+        try:
+            final_json["title"] = compute_claim_title(final_json)
+        except Exception:
+            pass
             # 3) Salvează final_json complet (cu title)            
         file_path = _save_claim(final_json)
 
@@ -467,6 +578,10 @@ def doctor_message(req: MessageRequest):
     if status_note:
         status_note = f"✅ Got it — {status_note}"
 
+    try:
+        invoice["title"] = compute_claim_title(invoice)
+    except Exception:
+        pass
     miss = missing_required(invoice)
     if miss:
         pre = (status_note + "\n" if status_note else "")

@@ -14,6 +14,7 @@ export type Thread = {
   title: string;
   active: boolean;
   insuranceStatus?: 'pending' | 'approved' | 'denied' | null;
+  transient?: boolean; // not persisted; hidden from Recents until first user prompt
 };
 
 
