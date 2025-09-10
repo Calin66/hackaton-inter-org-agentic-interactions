@@ -126,8 +126,6 @@ def generate_missing_prompt(invoice: Dict[str, Any], missing_keys: List[str]) ->
 
 
 # ------------------ Natural language intent parsing ------------------
-# ------------------ Natural language intent parsing ------------------
-# --- replace the existing INTENT_SYSTEM in llm.py ---
 INTENT_SYSTEM = """
 You convert a doctor's free-text message into a structured ACTION for a hospital billing assistant.
 
@@ -150,14 +148,16 @@ You MUST return STRICT JSON with keys:
   - for add_procedure: { "procedure_free_text": string }
   - for remove_procedure_by_index: { "index": integer >=1 }  # 1-based
   - for remove_procedure_by_name: { "name": string }
-  - for discount_percent: { "percent": number }
+  - for discount_percent: { "percent": number, "index": integer (optional, 1-based), "name": string (optional) }
+    # If "index" is present, apply to that procedure position; if "name" is present, apply to that procedure by exact name.
+    # If neither is present, apply to ALL procedures.
   - for set_price: { "name": string, "amount": number }
   - for provide_fields: {
         "patient name": string (optional),
         "patient SSN": string (optional),
+        "date of service": string (optional, any natural date; the server will normalize),
         "diagnose": string (optional),
-        "procedures": array of strings (optional),
-        "date of service": string (YYYY-MM-DD) (optional)
+        "procedures": array of strings (optional)
     }
   - for set_work_accident: {
         "suspected": boolean (optional, default true if details provided),
@@ -169,6 +169,16 @@ You MUST return STRICT JSON with keys:
     }
   - for smalltalk: { "reply": string }
   - for unknown: { "reason": string }
+
+IMPORTANT – USING current_procedures:
+- You will also be given a list called current_procedures (exact line names on the invoice).
+- When the message targets a specific procedure by NAME, set params.name to the EXACT string from current_procedures:
+  * match case-insensitively, ignoring minor punctuation/hyphens/spaces;
+  * pick the closest match if there’s minor variation;
+  * do NOT invent new names.
+- When the message targets a specific procedure by POSITION (e.g., "the second"), set params.index accordingly (1-based).
+- If the message says "to <procedure>" or otherwise targets a single line, you MUST include either params.name or params.index.
+  Only omit both for broad commands like "apply a 10% discount" that clearly apply to all procedures.
 
 SCOPE POLICY:
 - The assistant is ONLY for hospital billing tasks: drafting/adjusting/approving invoices, patient identifiers, diagnosis strings, procedures, prices/discounts, sending to insurance, and marking work accidents metadata for billing.
@@ -194,6 +204,7 @@ Return ONLY the JSON object. No commentary.
 def interpret_doctor_message(message: str, current_lines: List[str]) -> Dict[str, Any]:
     client = get_client()
     model = get_model()
+    # Expanded examples to bias name/index discounts and date changes
     # Examples include Romanian variants to robustly trigger intents
     context = {
         "current_procedures": current_lines,

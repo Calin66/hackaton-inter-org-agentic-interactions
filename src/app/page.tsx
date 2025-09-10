@@ -125,44 +125,119 @@ export default function Page() {
   // to be able to cancel the in-flight request
   const abortRef = useRef<AbortController | null>(null);
 
-  // hydrate from localStorage
-  useEffect(() => {
-    try {
-      const rawT = localStorage.getItem('threads');
-      const rawM = localStorage.getItem('messagesById');
-      if (rawT && rawM) {
-        const parsedT: Thread[] = JSON.parse(rawT);
-        const parsedM: Record<string, Message[]> = JSON.parse(rawM);
-        if (Array.isArray(parsedT) && parsedT.length) setThreads(parsedT);
-        if (parsedM && typeof parsedM === 'object') setMessagesById(parsedM);
-      }
-    } catch {
-      /* ignore */
-    }
-  }, []);
+  // ----------------------- Chat DB helpers (FastAPI) ----------------------
+  async function dbListChats(): Promise<Thread[]> {
+    const res = await fetch(`${API_BASE}/chats`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const items = Array.isArray(json?.items) ? json.items : [];
+    return items.map((r: any) => ({
+      id: r.id,
+      title: r.title,
+      active: false,
+      insuranceStatus: r.insurance_status ?? null,
+    }));
+  }
+  async function dbCreateChat(title: string, id?: string): Promise<Thread> {
+    const body: any = { title };
+    if (id) body.id = id;
+    const res = await fetch(`${API_BASE}/chats`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`Failed to create chat (${res.status})`);
+    const row = await res.json();
+    return {
+      id: row.id,
+      title: row.title,
+      active: false,
+      insuranceStatus: row.insurance_status ?? null,
+    };
+  }
+  async function dbDeleteChat(id: string): Promise<void> {
+    await fetch(`${API_BASE}/chats/${id}`, { method: 'DELETE' });
+  }
+  async function dbPatchChat(
+    id: string,
+    patch: Partial<Thread> & { insuranceStatus?: 'pending' | 'approved' | 'denied' | null }
+  ): Promise<void> {
+    const body: any = {};
+    if (typeof patch.title === 'string') body.title = patch.title;
+    if (patch.insuranceStatus != null) body.insuranceStatus = patch.insuranceStatus;
+    if (Object.keys(body).length === 0) return;
+    await fetch(`${API_BASE}/chats/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+  async function dbListMessages(id: string): Promise<Message[]> {
+    const res = await fetch(`${API_BASE}/chats/${id}/messages`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const items = Array.isArray(json?.items) ? json.items : [];
+    return items.map((m: any) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      tool_result: m.tool_result,
+      status: m.status,
+    }));
+  }
+  async function dbAddMessage(id: string, msg: Message): Promise<void> {
+    const payload: any = { id: msg.id, role: msg.role, content: msg.content };
+    if ((msg as any).tool_result !== undefined) payload.tool_result = (msg as any).tool_result;
+    if ((msg as any).status !== undefined) payload.status = (msg as any).status;
+    await fetch(`${API_BASE}/chats/${id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
 
-  // persist to localStorage
+  // hydrate from DB (create first chat if none; seed welcome message)
   useEffect(() => {
-    try {
-      localStorage.setItem('threads', JSON.stringify(threads));
-      localStorage.setItem('messagesById', JSON.stringify(messagesById));
-    } catch {
-      /* ignore */
-    }
-  }, [threads, messagesById]);
+    (async () => {
+      try {
+        let ts = await dbListChats();
+        if (!ts.length) {
+          const first = await dbCreateChat('Claim 1');
+          ts = [{ ...first }];
+          const welcome: Message = seedMessages()[0];
+          await dbAddMessage(first.id, welcome);
+          setMessagesById({ [first.id]: [welcome] });
+        } else {
+          const active = ts[0];
+          const msgs = await dbListMessages(active.id);
+          setMessagesById({ [active.id]: msgs.length ? msgs : seedMessages() });
+        }
+        setThreads(ts.map((t, i) => ({ ...t, active: i === 0 })));
+      } catch {
+        // ignore
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const activeId = useMemo(() => threads.find((t) => t.active)?.id ?? threads[0].id, [threads]);
   const activeMessages = messagesById[activeId] ?? [];
-  const hasPendingInsurance = useMemo(
-    () => !!activeMessages.find((m: any) => m?.meta?.insurance_pending),
-    [activeMessages]
-  );
+  const hasPendingInsurance = useMemo(() => {
+    const metaPending = !!activeMessages.find((m: any) => m?.meta?.insurance_pending);
+    const threadPending =
+      (threads.find((t) => t.id === activeId) as any)?.insuranceStatus === 'pending';
+    return metaPending || !!threadPending;
+  }, [activeMessages, threads, activeId]);
 
-  const [pending, setPending] = useState(false);
+  // Track which thread (if any) has a pending request
+  const [pendingFor, setPendingFor] = useState<string | null>(null);
+  const pending = pendingFor === activeId;
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   // In-chat insurance approval is disabled; approvals happen on /request
+  // NOTE: We now add lightweight in-chat step buttons to trigger
+  // 'approve' and 'send to insurance' prompts for better UX.
 
   // auto-scroll when new messages
   useEffect(() => {
@@ -248,6 +323,7 @@ export default function Page() {
           const content = lines.join('\n');
 
           // Clear pending card meta and append approved message
+          const aid = Math.random().toString(36).slice(2, 10);
           setMessagesById((m) => {
             const msgs = (m[activeId] ?? []).map((mm: any) =>
               mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm
@@ -257,7 +333,7 @@ export default function Page() {
               [activeId]: [
                 ...msgs,
                 {
-                  id: Math.random().toString(36).slice(2, 10),
+                  id: aid,
                   role: 'assistant',
                   content,
                   tool_result: tool,
@@ -269,8 +345,23 @@ export default function Page() {
           setThreads((ts) =>
             ts.map((t) => (t.id === activeId ? { ...t, insuranceStatus: 'approved' } : t))
           );
+          (async () => {
+            try {
+              await dbPatchChat(activeId, { insuranceStatus: 'approved' });
+            } catch {}
+            try {
+              await dbAddMessage(activeId, {
+                id: aid,
+                role: 'assistant',
+                content,
+                tool_result: tool,
+                status: 'approved',
+              } as any);
+            } catch {}
+          })();
           stopped = true;
         } else if (st === 'denied') {
+          const aid = Math.random().toString(36).slice(2, 10);
           setMessagesById((m) => {
             const msgs = (m[activeId] ?? []).map((mm: any) =>
               mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm
@@ -280,9 +371,9 @@ export default function Page() {
               [activeId]: [
                 ...msgs,
                 {
-                  id: Math.random().toString(36).slice(2, 10),
+                  id: aid,
                   role: 'assistant',
-                  content: 'Insurance reply denied. The response was not posted to chat.',
+                  content: 'Insurance denied.',
                   status: 'denied',
                 } as any,
               ],
@@ -291,6 +382,19 @@ export default function Page() {
           setThreads((ts) =>
             ts.map((t) => (t.id === activeId ? { ...t, insuranceStatus: 'denied' } : t))
           );
+          (async () => {
+            try {
+              await dbPatchChat(activeId, { insuranceStatus: 'denied' });
+            } catch {}
+            try {
+              await dbAddMessage(activeId, {
+                id: aid,
+                role: 'assistant',
+                content: 'Insurance denied.',
+                status: 'denied',
+              } as any);
+            } catch {}
+          })();
           stopped = true;
         }
       } catch {
@@ -312,28 +416,62 @@ export default function Page() {
 
   function handleChangeConvo(id: string) {
     setThreads((ts) => ts.map((t) => ({ ...t, active: t.id === id })));
+    if (!messagesById[id]) {
+      (async () => {
+        try {
+          const msgs = await dbListMessages(id);
+          setMessagesById((m) => ({ ...m, [id]: msgs.length ? msgs : seedMessages() }));
+        } catch {
+          /* ignore */
+        }
+      })();
+    }
   }
 
   function newClaim() {
+    // If a draft exists, just focus it
+    const existingDraft = threads.find((t: any) => (t as any).transient);
+    if (existingDraft) {
+      setThreads((prev) => prev.map((t) => ({ ...t, active: t.id === existingDraft.id })));
+      return;
+    }
     const id = newId();
+    const title = `Claim ${threads.filter((t) => !(t as any).transient).length + 1}`;
+    // Do NOT create DB chat yet; just prepare a transient draft thread
     setThreads((prev) => {
       const next = prev.map((t) => ({ ...t, active: false }));
-      return [...next, { id, title: `Claim ${next.length + 1}`, active: true }];
+      return [...next, { id, title, active: true, transient: true } as any];
     });
     setMessagesById((prev) => ({ ...prev, [id]: seedMessages() }));
   }
 
   function handleDeleteConvo(id: string) {
-    setThreads((prev) => {
-      const filtered = prev.filter((t) => t.id !== id);
-      if (!filtered.length) {
-        setMessagesById({ [INITIAL_THREAD_ID]: seedMessages() });
-        return [{ id: INITIAL_THREAD_ID, title: 'Claim 1', active: true }];
-      }
-      if (prev.find((t) => t.id === id)?.active) filtered[0].active = true;
-      return filtered;
-    });
-    setMessagesById(({ [id]: _drop, ...rest }) => rest);
+    (async () => {
+      try {
+        await dbDeleteChat(id);
+      } catch {}
+      setThreads((prev) => {
+        const filtered = prev.filter((t) => t.id !== id);
+        if (!filtered.length) {
+          (async () => {
+            try {
+              const first = await dbCreateChat('Claim 1');
+              const seed = seedMessages();
+              await dbAddMessage(first.id, seed[0]);
+              setThreads([{ id: first.id, title: 'Claim 1', active: true }]);
+              setMessagesById({ [first.id]: seed });
+            } catch {
+              setMessagesById({ [INITIAL_THREAD_ID]: seedMessages() });
+              setThreads([{ id: INITIAL_THREAD_ID, title: 'Claim 1', active: true }]);
+            }
+          })();
+          return [] as any;
+        }
+        if (prev.find((t) => t.id === id)?.active) filtered[0].active = true;
+        return filtered;
+      });
+      setMessagesById(({ [id]: _drop, ...rest }) => rest);
+    })();
   }
 
   /* ----------------------------- Networking ----------------------------- */
@@ -344,7 +482,7 @@ export default function Page() {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    setPending(true);
+    setPendingFor(sessionId);
     try {
       const res = await fetch(`${API_BASE}/doctor_message`, {
         method: 'POST',
@@ -360,14 +498,22 @@ export default function Page() {
       const json = await res.json();
       const { text: assistantText, tool, status, meta } = normalizeResponse(json);
 
+      if (tool?.title) {
+        setThreads((ts) => ts.map((t) => (t.id === sessionId ? { ...t, title: tool.title } : t)));
+        try {
+          await dbPatchChat(sessionId, { title: tool.title });
+        } catch {}
+      }
+
       // If you want to keep using your existing ChatMessage tool pane,
       // store the invoice under `tool_result` (no need to change ChatMessage).
+      const assistantId = newId();
       setMessagesById((m) => ({
         ...m,
         [sessionId]: [
           ...(m[sessionId] ?? []),
           {
-            id: newId(),
+            id: assistantId,
             role: 'assistant',
             content: assistantText ?? '',
             tool_result: tool, // <- structured invoice lives here
@@ -376,12 +522,25 @@ export default function Page() {
           } as any,
         ],
       }));
+      // Persist assistant message
+      try {
+        await dbAddMessage(sessionId, {
+          id: assistantId,
+          role: 'assistant',
+          content: assistantText ?? '',
+          tool_result: tool as any,
+          status: status as any,
+        } as any);
+      } catch {}
 
       // If insurance pending arrived, set sidebar status = pending for this thread
       if (meta && (meta as any).insurance_pending) {
         setThreads((ts) =>
           ts.map((t) => (t.id === sessionId ? { ...t, insuranceStatus: 'pending' } : t))
         );
+        try {
+          await dbPatchChat(sessionId, { insuranceStatus: 'pending' });
+        } catch {}
       }
     } catch (e: any) {
       if (e?.name !== 'AbortError') {
@@ -398,16 +557,82 @@ export default function Page() {
         }));
       }
     } finally {
-      setPending(false);
+      // Only clear if this request is the one currently marked as pending
+      setPendingFor((prev) => (prev === sessionId ? null : prev));
       abortRef.current = null;
     }
   }
 
   const filteredThreads = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return threads;
-    return threads.filter((t) => t.title.toLowerCase().includes(q));
+    const base = threads.filter((t: any) => !(t as any).transient);
+    if (!q) return base;
+    return base.filter((t) => t.title.toLowerCase().includes(q));
   }, [searchQuery, threads]);
+
+  // --------- Action helpers: determine when to show step buttons ---------
+  function isInsuranceToolResult(obj: any): boolean {
+    if (!obj || typeof obj !== 'object') return false;
+    return 'result_json' in obj || 'message' in obj; // shape used by insurance agent
+  }
+  function isInvoiceShape(obj: any): boolean {
+    if (!obj || typeof obj !== 'object') return false;
+    if (isInsuranceToolResult(obj)) return false;
+    // heuristic: hospital invoice from backend
+    return (
+      Array.isArray(obj?.procedures) &&
+      ('patient name' in obj || 'patient SSN' in obj || 'diagnose' in obj)
+    );
+  }
+  function invoiceReady(inv: any): boolean {
+    if (!isInvoiceShape(inv)) return false;
+    const hasPN =
+      typeof inv?.['patient name'] === 'string' && inv['patient name'].trim().length > 0;
+    const hasSSN = typeof inv?.['patient SSN'] === 'string' && inv['patient SSN'].trim().length > 0;
+    const hasDx = typeof inv?.diagnose === 'string' && inv.diagnose.trim().length > 0;
+    const hasProcedures = Array.isArray(inv?.procedures) && inv.procedures.length > 0;
+    return hasPN && hasSSN && hasDx && hasProcedures;
+  }
+  const lastAssistantWithTool = useMemo(() => {
+    const arr = [...(activeMessages ?? [])].reverse();
+    return arr.find((m) => m.role === 'assistant' && (m as any)?.tool_result);
+  }, [activeMessages]);
+  // Whether we already have an approved message in this thread
+  const hasApprovedMessage = useMemo(
+    () => !![...(activeMessages ?? [])].reverse().find((m) => (m as any)?.status === 'approved'),
+    [activeMessages]
+  );
+  const threadInsuranceStatus = useMemo(
+    () => (threads.find((t) => t.id === activeId) as any)?.insuranceStatus ?? null,
+    [threads, activeId]
+  );
+  // Show Approve when invoice is complete, nothing sent to insurance yet, and not already approved
+  const canApproveInvoice = useMemo(() => {
+    if (!lastAssistantWithTool) return false;
+    const tool = (lastAssistantWithTool as any).tool_result;
+    if (!invoiceReady(tool)) return false;
+    if (hasApprovedMessage) return false;
+    if (hasPendingInsurance) return false;
+    if (
+      threadInsuranceStatus === 'approved' ||
+      threadInsuranceStatus === 'pending' ||
+      threadInsuranceStatus === 'denied'
+    )
+      return false;
+    return true;
+  }, [lastAssistantWithTool, hasApprovedMessage, hasPendingInsurance, threadInsuranceStatus]);
+  const canSendToInsurance = useMemo(() => {
+    // Show send-to-insurance only after hospital approval exists
+    if (!hasApprovedMessage) return false;
+    if (hasPendingInsurance) return false; // already sent and awaiting approval
+    if (
+      threadInsuranceStatus === 'approved' ||
+      threadInsuranceStatus === 'pending' ||
+      threadInsuranceStatus === 'denied'
+    )
+      return false;
+    return true;
+  }, [hasApprovedMessage, hasPendingInsurance, threadInsuranceStatus]);
 
   /* -------------------------------- Render ------------------------------- */
   return (
@@ -441,16 +666,18 @@ export default function Page() {
               Recents
             </div>
             <div className="mt-2 space-y-1 px-2">
-              {threads.map((t) => (
-                <RecentItem
-                  key={t.id}
-                  title={t.title}
-                  active={t.active}
-                  status={(t as any).insuranceStatus ?? null}
-                  handleChangeConvo={() => handleChangeConvo(t.id)}
-                  handleDeleteConvo={() => handleDeleteConvo(t.id)}
-                />
-              ))}
+              {threads
+                .filter((t: any) => !(t as any).transient)
+                .map((t) => (
+                  <RecentItem
+                    key={t.id}
+                    title={t.title}
+                    active={t.active}
+                    status={(t as any).insuranceStatus ?? null}
+                    handleChangeConvo={() => handleChangeConvo(t.id)}
+                    handleDeleteConvo={() => handleDeleteConvo(t.id)}
+                  />
+                ))}
             </div>
           </div>
         </aside>
@@ -486,22 +713,116 @@ export default function Page() {
                   )
               )}
               {pending && <AssistantTypingSkeleton />}
+
+              {/* Step action bar: Approve -> Send to insurance */}
+              {(canApproveInvoice || canSendToInsurance) && !pending && (
+                <div className="sticky bottom-0 z-10 mt-2 rounded-2xl border border-neutral-800 bg-[#121212] p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm text-neutral-300">
+                      {canApproveInvoice
+                        ? 'Invoice is complete. Approve to finalize.'
+                        : 'Invoice approved. Send to insurance for verification.'}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {canApproveInvoice && (
+                        <button
+                          disabled={pending}
+                          onClick={() => {
+                            const text = 'approve';
+                            const uid = newId();
+                            setMessagesById((m) => ({
+                              ...m,
+                              [activeId]: [
+                                ...(m[activeId] ?? []),
+                                { id: uid, role: 'user', content: text },
+                              ],
+                            }));
+                            (async () => {
+                              try {
+                                await dbAddMessage(activeId, {
+                                  id: uid,
+                                  role: 'user',
+                                  content: text,
+                                } as any);
+                              } catch {}
+                            })();
+                            sendToBackend(text, activeId);
+                          }}
+                          className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+                        >
+                          Approve
+                        </button>
+                      )}
+                      {canSendToInsurance && (
+                        <button
+                          disabled={pending}
+                          onClick={() => {
+                            const text = 'send to insurance';
+                            const uid = newId();
+                            setMessagesById((m) => ({
+                              ...m,
+                              [activeId]: [
+                                ...(m[activeId] ?? []),
+                                { id: uid, role: 'user', content: text },
+                              ],
+                            }));
+                            (async () => {
+                              try {
+                                await dbAddMessage(activeId, {
+                                  id: uid,
+                                  role: 'user',
+                                  content: text,
+                                } as any);
+                              } catch {}
+                            })();
+                            sendToBackend(text, activeId);
+                          }}
+                          className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+                        >
+                          Send to insurance
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="py-8" />
             </div>
           </div>
 
           <ClaudeComposer
-            disabledd={pending} // already in your code; keeps input disabled
-            onSend={(text) => {
+            disabledd={pending || threadInsuranceStatus === 'denied'} // disable after denial
+            onSend={async (text) => {
               const trimmed = (text ?? '').trim();
               if (!trimmed) return;
+              const uid = newId();
+              // If active thread is transient, create chat in DB now and persist welcome
+              const thr = threads.find((t) => t.active);
+              if ((thr as any)?.transient) {
+                try {
+                  await dbCreateChat(thr!.title, thr!.id);
+                  // Persist seed welcome message first (if present)
+                  const seed = (messagesById[thr!.id] ?? [])[0];
+                  if (seed) {
+                    await dbAddMessage(thr!.id, seed as any);
+                  }
+                } catch {}
+                // Mark non-transient now so it appears in Recents
+                setThreads((prev) =>
+                  prev.map((t) => (t.id === thr!.id ? { ...t, transient: false } : t))
+                );
+              }
               setMessagesById((m) => ({
                 ...m,
-                [activeId]: [
-                  ...(m[activeId] ?? []),
-                  { id: newId(), role: 'user', content: trimmed },
-                ],
+                [activeId]: [...(m[activeId] ?? []), { id: uid, role: 'user', content: trimmed }],
               }));
+              // Persist user message
+              (async () => {
+                try {
+                  await dbAddMessage(activeId, { id: uid, role: 'user', content: trimmed } as any);
+                } catch {}
+              })();
               sendToBackend(trimmed, activeId);
             }}
           />
