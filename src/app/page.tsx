@@ -147,17 +147,14 @@ export default function Page() {
     await fetch(`${API_BASE}/chats/${id}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   }
 
-  // hydrate from DB (create first chat if none; seed welcome message)
+  // hydrate from DB (do not auto-create chats; empty recents is allowed)
   useEffect(() => {
     (async () => {
       try {
         let ts = await dbListChats();
         if (!ts.length) {
-          const first = await dbCreateChat('Claim 1');
-          ts = [{ ...first }];
-          const welcome: Message = seedMessages()[0];
-          await dbAddMessage(first.id, welcome);
-          setMessagesById({ [first.id]: [welcome] });
+          setThreads([]);
+          setMessagesById({});
         } else {
           const active = ts[0];
           const msgs = await dbListMessages(active.id);
@@ -171,13 +168,30 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const activeId = useMemo(() => threads.find((t) => t.active)?.id ?? threads[0].id, [threads]);
-  const activeMessages = messagesById[activeId] ?? [];
+  const activeId = useMemo(() => threads.find((t) => t.active)?.id ?? threads[0]?.id ?? null, [threads]);
+  const activeMessages = activeId ? (messagesById[activeId] ?? []) : [];
   const hasPendingInsurance = useMemo(() => {
     const metaPending = !!activeMessages.find((m: any) => m?.meta?.insurance_pending);
-    const threadPending = (threads.find((t) => t.id === activeId) as any)?.insuranceStatus === 'pending';
+    const threadPending = activeId ? ((threads.find((t) => t.id === activeId) as any)?.insuranceStatus === 'pending') : false;
     return metaPending || !!threadPending;
   }, [activeMessages, threads, activeId]);
+
+  // For polling: if thread is approved/denied but no final message exists yet, keep polling
+  const hasFinalInsuranceMessage = useMemo(() => {
+    const arr = [...(activeMessages ?? [])].reverse();
+    const isIns = (tr: any) => tr && typeof tr === 'object' && ('result_json' in tr || 'message' in tr);
+    return !!arr.find((m: any) => (m?.status === 'approved' || m?.status === 'denied') && isIns(m?.tool_result));
+  }, [activeMessages]);
+  const threadInsStatusForPoll = useMemo(
+    () => (activeId ? (threads.find((t) => t.id === activeId) as any)?.insuranceStatus ?? null : null),
+    [threads, activeId]
+  );
+  const shouldPollInsuranceNow = useMemo(() => {
+    const st = threadInsStatusForPoll as any;
+    if (st === 'pending') return true;
+    if ((st === 'approved' || st === 'denied') && !hasFinalInsuranceMessage) return true;
+    return false;
+  }, [threadInsStatusForPoll, hasFinalInsuranceMessage]);
 
   // Track which thread (if any) has a pending request
   const [pendingFor, setPendingFor] = useState<string | null>(null);
@@ -194,9 +208,10 @@ export default function Page() {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
   }, [messagesById[activeId]?.length, pending]);
 
-  // Poll backend for approved/denied insurance decisions when there is a pending one
+  // Poll backend for approved/denied insurance decisions
   useEffect(() => {
-    if (!hasPendingInsurance) return;
+    if (!activeId) return;
+    if (!hasPendingInsurance && !shouldPollInsuranceNow) return;
     let stopped = false;
 
     async function tick() {
@@ -212,23 +227,24 @@ export default function Page() {
         if (!it) return;
         const st = it.status;
 
-        // Skip if we've already reflected a terminal status
-        const alreadyTerminal = threads.find((t) => t.id === activeId && (t as any).insuranceStatus && (t as any).insuranceStatus !== 'pending');
-        if (alreadyTerminal) {
-          stopped = true;
-          return;
-        }
+        // Do not early-return on terminal thread status; we still need to append
+        // the final approved/denied message if it's not present yet. Dedup checks
+        // below ensure we don't double-append.
 
         if (st === 'approved') {
           const tool = it?.insurance_reply?.tool_result ?? null;
           const rj = (tool?.result_json ?? {}) as any;
           const payable = typeof rj.total_payable === 'number' ? rj.total_payable : null;
           const policyId = rj.policy_id ?? '';
+          const hospitalTotal = Number((it as any)?.invoice?.total ?? NaN);
+          const hospStr = Number.isFinite(hospitalTotal)
+            ? `$${hospitalTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : '-';
           const totalStr = payable != null
             ? `$${payable.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
             : '-';
           const header = `## Insurance Decision (Approved)`;
-          const lines = [header, `Policy: ${policyId || '-'}`, `Total payable: ${totalStr}`];
+          const lines = [header, `Policy: ${policyId || '-'}`, `Total payable: ${totalStr}`, `Hospital total: ${hospStr}`];
           const content = lines.join('\n');
 
           // Clear pending card meta and append approved message
@@ -237,7 +253,11 @@ export default function Page() {
           setMessagesById((m) => {
             const current = m[activeId] ?? [];
             const msgs = current.map((mm: any) => (mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm));
-            const already = msgs.some((mm: any) => (mm?.status === 'approved'));
+            const already = msgs.some((mm: any) => {
+              const tr = (mm?.tool_result as any);
+              const isIns = tr && typeof tr === 'object' && ('result_json' in tr || 'message' in tr);
+              return mm?.status === 'approved' && isIns;
+            });
             const next = already ? msgs : [...msgs, { id: aid, role: 'assistant', content, tool_result: tool, status: 'approved' } as any];
             appended = !already;
             return { ...m, [activeId]: next };
@@ -254,14 +274,22 @@ export default function Page() {
           const tool = it?.insurance_reply?.tool_result ?? null;
           const rj = (tool?.result_json ?? {}) as any;
           const reason = (rj?.reason ? String(rj.reason) : 'No matching policy or not eligible');
+          const hospitalTotal = Number((it as any)?.invoice?.total ?? NaN);
+          const hospStr = Number.isFinite(hospitalTotal)
+            ? `$${hospitalTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : '-';
           const header = `## Insurance Decision (Denied)`;
-          const content = [header, `Reason: ${reason}`].join('\n');
+          const content = [header, `Reason: ${reason}`, `Hospital total: ${hospStr}`].join('\n');
 
           let appended = false;
           setMessagesById((m) => {
             const current = m[activeId] ?? [];
             const msgs = current.map((mm: any) => (mm?.meta?.insurance_pending ? { ...mm, meta: undefined } : mm));
-            const already = msgs.some((mm: any) => (mm?.status === 'denied'));
+            const already = msgs.some((mm: any) => {
+              const tr = (mm?.tool_result as any);
+              const isIns = tr && typeof tr === 'object' && ('result_json' in tr || 'message' in tr);
+              return mm?.status === 'denied' && isIns;
+            });
             const next = already ? msgs : [...msgs, { id: aid, role: 'assistant', content, status: 'denied', tool_result: tool } as any];
             appended = !already;
             return { ...m, [activeId]: next };
@@ -283,7 +311,7 @@ export default function Page() {
     const id = setInterval(() => { if (!stopped) tick(); }, 5000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPendingInsurance, activeId, threads]);
+  }, [hasPendingInsurance, shouldPollInsuranceNow, activeId, threads, activeMessages]);
 
   /* ---------------------------- Thread actions --------------------------- */
   const newId = () => Math.random().toString(36).slice(2, 10);
@@ -325,18 +353,8 @@ function handleDeleteConvo(id: string) {
       setThreads((prev) => {
         const filtered = prev.filter((t) => t.id !== id);
         if (!filtered.length) {
-          (async () => {
-            try {
-              const first = await dbCreateChat('Claim 1');
-              const seed = seedMessages();
-              await dbAddMessage(first.id, seed[0]);
-              setThreads([{ id: first.id, title: 'Claim 1', active: true }]);
-              setMessagesById({ [first.id]: seed });
-            } catch {
-              setMessagesById({ [INITIAL_THREAD_ID]: seedMessages() });
-              setThreads([{ id: INITIAL_THREAD_ID, title: 'Claim 1', active: true }]);
-            }
-          })();
+          // Allow empty recents; clear messages
+          setMessagesById({});
           return [] as any;
         }
         if (prev.find((t) => t.id === id)?.active) filtered[0].active = true;
@@ -469,6 +487,7 @@ function handleDeleteConvo(id: string) {
     () => (threads.find((t) => t.id === activeId) as any)?.insuranceStatus ?? null,
     [threads, activeId]
   );
+  
   // Show Approve when invoice is complete, nothing sent to insurance yet, and not already approved
   const canApproveInvoice = useMemo(() => {
     if (!lastAssistantWithTool) return false;
@@ -623,7 +642,7 @@ function handleDeleteConvo(id: string) {
           </div>
 
           <ClaudeComposer
-            disabledd={pending || threadInsuranceStatus === 'denied'} // disable after denial
+            disabledd={!activeId || pending || threadInsuranceStatus === 'denied'} // disable if no thread or after denial
             onSend={async (text) => {
               const trimmed = (text ?? '').trim();
               if (!trimmed) return;
@@ -650,8 +669,8 @@ function handleDeleteConvo(id: string) {
                 ],
               }));
               // Persist user message
-              (async () => { try { await dbAddMessage(activeId, { id: uid, role: 'user', content: trimmed } as any); } catch {} })();
-              sendToBackend(trimmed, activeId);
+              (async () => { if (activeId) { try { await dbAddMessage(activeId, { id: uid, role: 'user', content: trimmed } as any); } catch {} } })();
+              if (activeId) sendToBackend(trimmed, activeId);
             }}
           />
         </main>
