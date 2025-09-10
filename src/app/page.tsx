@@ -280,6 +280,14 @@ export default function Page() {
       const json = await res.json();
       const { text: assistantText, tool, status, meta } = normalizeResponse(json);
 
+      if (status === 'approved' && tool?.title) {
+        setThreads((ts) =>
+          ts.map((t) =>
+            t.id === sessionId ? { ...t, title: tool.title } : t
+          )
+        );
+      }
+
       // If you want to keep using your existing ChatMessage tool pane,
       // store the invoice under `tool_result` (no need to change ChatMessage).
       setMessagesById((m) => ({

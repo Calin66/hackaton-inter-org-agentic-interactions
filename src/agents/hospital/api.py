@@ -71,14 +71,45 @@ def _canonicalize_invoice(inv: Dict[str, Any]) -> Dict[str, Any]:
         out["procedures"].append({"name": p.get("name", ""), "billed": billed})
     return out
 
-def _save_claim(inv: Dict[str, Any]) -> str:
-    clean = _canonicalize_invoice(inv)
-    ssn = str(clean.get("patient SSN", "")).strip() or "unknown"
-    dos = str(clean.get("date of service", "")).replace("-", "") or "nodate"
+def _save_claim(final_json: Dict[str, Any]) -> str:
+    ssn = str(final_json.get("patient SSN") or final_json.get("patientSSN") or "").strip() or "unknown"
+    dos = str(final_json.get("date of service") or final_json.get("dateOfService") or "").replace("-", "") or "nodate"
     fname = f"{dos}_{ssn}_{uuid4().hex[:8]}.json"
     path = _claims_dir() / fname
-    path.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(final_json, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path)
+def generate_claim_title(inv: Dict[str, Any]) -> str:
+    name = (inv.get("patient name")
+            or inv.get("full name")
+            or inv.get("patient SSN")
+            or "Patient")
+    name = str(name).strip()
+
+    procedures = inv.get("procedures", [])
+    main_proc = procedures[0]["name"] if procedures and isinstance(procedures[0], dict) else ""
+
+    try:
+        total = sum(float(p.get("billed", 0)) for p in procedures)
+    except Exception:
+        total = 0.0
+
+    raw_date = inv.get("date of service") or inv.get("dateOfService")
+    try:
+        dt = datetime.fromisoformat(str(raw_date).replace("Z", ""))
+        formatted_date = dt.date().isoformat()
+    except Exception:
+        formatted_date = ""
+
+    parts = [name]
+    if main_proc:
+        parts.append(f"— {main_proc}")
+    if total:
+        parts.append(f"· ${total:,.2f}")
+    if formatted_date:
+        parts.append(f"on {formatted_date}")
+
+    return " ".join(parts)[:120]
+
 # --------------------------------------------------------
 
 def _to_insurance_claim(inv: Dict[str, Any]) -> Dict[str, Any]:
@@ -102,16 +133,9 @@ def _send_claim_to_insurance(inv: Dict[str, Any], conversation_id: str | None = 
     try:
         resp = requests.post(url, json=payload, timeout=30)
         resp.raise_for_status()
-        data = resp.json()
-        # Expect schema of ChatResponse: { conversation_id, reply, tool_result }
-        return {
-            "conversation_id": data.get("conversation_id") or conversation_id or "",
-            "reply": data.get("reply", ""),
-            "tool_result": data.get("tool_result"),
-        }
+        return resp.json()  # lăsăm UI-ul să decidă ce folosește
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed contacting Insurance Agent: {e}")
-
 
 @app.on_event("startup")
 def _startup():
@@ -232,10 +256,6 @@ def doctor_message(req: MessageRequest):
 
     status_note = None
 
-    if atype == "smalltalk":
-        reply = params.get("reply") or "Hi! How can I help with the invoice?"
-        return PendingResponse(session_id=sid, agent_reply=reply, invoice=invoice).model_dump()
-
     if atype == "approve":
         miss = missing_required(invoice)
         if miss:
@@ -244,12 +264,25 @@ def doctor_message(req: MessageRequest):
             store.upsert(sid, session)
             return PendingResponse(session_id=sid, agent_reply=reply, invoice=invoice).model_dump()
 
-        # SAVE the approved claim to data/claims as JSON in the requested structure
-        file_path = _save_claim(invoice)
+        # 1) Canonicalize
+        final_json = _canonicalize_invoice(invoice)
 
-        session.update({"status": "approved", "invoice": invoice})
+        # ✅ 2) Adaugă titlul uman
+        final_json["title"] = generate_claim_title(final_json)
+            # 3) Salvează final_json complet (cu title)            
+        file_path = _save_claim(final_json)
+
+            # 4) Update sesiune
+        session.update({"status": "approved", "invoice": final_json})
         store.upsert(sid, session)
-        return ApprovedResponse(session_id=sid, final_json=_canonicalize_invoice(invoice), file_path=file_path).model_dump()
+
+          # 5) Răspuns final care conține title
+        return ApprovedResponse(
+            session_id=sid,   
+            final_json=final_json,
+            file_path=file_path
+        ).model_dump()
+
 
     elif atype == "send_to_insurance":
         # Ensure minimal required fields are there before sending
@@ -431,3 +464,5 @@ def list_insurance_requests(status: str = Query("pending", pattern="^(pending|ap
         if it.get("status") == "received":
             it["status"] = "pending"
     return {"items": items}
+
+    
